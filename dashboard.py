@@ -396,7 +396,7 @@ with st.sidebar:
     # チャット入力
     user_input = st.text_area("", placeholder="ChatGPTに質問や相談をしてください...", key="chat_input", height=100)
     
-    if st.button("✈ 送信", key="send_button", use_container_width=True):
+    if st.button("✈✈ 送信", key="send_button", use_container_width=True):
         if user_input:
             st.success("回答を生成中です・・・")
         else:
