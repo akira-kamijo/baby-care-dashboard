@@ -249,7 +249,7 @@ def generate_sample_data():
     
     # 最新ログデータ
     log_data = [
-        {'time': '14:30', 'action': 'おむつ替え完了'},
+        {'time': '14:30', 'action': '授乳、150ml'},
         {'time': '13:45', 'action': '授乳, 200ml'},
         {'time': '12:30', 'action': 'お昼寝開始'},
         {'time': '11:15', 'action': 'おむつ替え完了'},
