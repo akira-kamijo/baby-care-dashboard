@@ -243,16 +243,45 @@ if not API_KEY:
 client = OpenAI(api_key=API_KEY)
 
 #ChatGPTによる回答生成
-def get_chat_response(prompt):
+#2025.9.22関
+#SYSTEM_PROMPTを記載してsystemメッセージ(役割設定)を一元管理
+SYSTEM_PROMPT = """\
+あなたは小児看護・育児の実務知識を持つアシスタントです。
+- 口調: 親身でやさしい丁寧語。断定は避け、根拠を短く添える。
+- 安全: 危険兆候・受診目安はあれば必ず明示（不安を煽りすぎない）。
+- 出力: 見出し→箇条書き→最後に「次の一歩」を1~3個。
+- 制約: 医療行為・診断はしない。専門家の診断を促す。
+"""
+#2025.9.22関
+#FORMAT_HINTを指定し、後続でユーザー質問と一緒にモデルに渡すことで回答の構造を誘導
+FORMAT_HINT = """\
+# 形式
+## 要点
+- 3~5点で簡潔に
+## 補足
+- 各項目を1~2文で
+## 次の一歩
+- 1~3個の具体的行動
+"""
+def get_chat_response(
+    user_query: str,
+    system_prompt: str = SYSTEM_PROMPT,
+    format_hint: str = FORMAT_HINT,
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.3,
+    max_tokens: int | None = None,
+) -> str:
     if not client.api_key:
         return "APIキーが設定されていません。"
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
-                {"role": "system", "content": "あなたは育児に関する専門家です。専門的で優しい口調で簡潔に回答してください。"},
-                {"role": "user", "content": prompt}
-            ]
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"{user_query}\n\n{format_hint}"},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
         return response.choices[0].message.content
     except Exception as e:
