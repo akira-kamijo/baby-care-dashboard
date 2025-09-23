@@ -24,13 +24,13 @@ st.markdown("""
         overflow: hidden;
     }
     
-    .main .block-container {
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-        max-height: 100vh;
+    .main .block-container{
+        padding-top: 1rem; 
+        padding-bottom: 1rem; 
+        max-height: 100vh; 
         overflow-y: auto;
     }
-    
+
     .main-header {
         font-size: clamp(1.5rem, 3vh, 2.2rem);
         font-weight: bold;
@@ -40,9 +40,9 @@ st.markdown("""
     }
     
     /* ヘッダーと水平線の間隔を調整 */
-    .stApp h1 + hr {
+    /*.stApp h1 + hr {
         margin-top: -1.5rem !important;
-    }
+    }:*/
 
     /* デスクトップ用（769px以上）：1画面表示 */
     @media (min-width: 769px) {
@@ -519,8 +519,10 @@ def main():
             unsafe_allow_html=True
         )
         st.markdown('</div>', unsafe_allow_html=True)
-        
+
+    #質問入力時、AIによる育児アドバイス部分に遷移するようにアンカーを設置。
     # ChatGPTによる回答表示欄
+    st.markdown('<div id="advice-anchor"></div>', unsafe_allow_html=True)
     st.header("AIによる育児アドバイス")
     st.markdown("---")
 
@@ -529,8 +531,36 @@ def main():
     else:
         st.info("サイドバーから質問を入力してください。")
 
-    
-
+    if '_last_scrolled' not in st.session_state:
+        st.session_state['_last_scrolled'] = 0
+    #ボタン押下後にAIによる育児アドバイス部分までスクロールさせる処理
+    if st.session_state.get('scroll_trigger', 0) != st.session_state.get('_last_scrolled', 0):
+        trig = st.session_state['scroll_trigger']
+        st.components.v1.html(
+            f"""
+            <script>
+            (function(){{
+                const doc = window.parent.document;
+                function go(retry=0){{
+                    const anchor = doc.querySelector('#advice-anchor');
+                    if(!anchor){{
+                        if(retry<100) return setTimeout(()=>go(retry+1), 20);
+                        return;
+                    }}
+                    anchor.scrollIntoView({{ block: 'start', behavior: 'auto' }});
+                    requestAnimationFrame(()=>{{
+                        anchor.scrollIntoView({{ block: 'start', behavior: 'smooth' }});
+                    }});
+                }}
+                setTimeout(()=>go(0), 150);
+            }})();
+            </script>
+            <div data-scroll-trigger="{trig}" style="display:none"></div>
+            """,
+            height=1
+        )
+        # ← 消費したトリガーを記録（ここが大事）
+        st.session_state['_last_scrolled'] = st.session_state['scroll_trigger']
 # サイドバー（質問・相談機能）
 with st.sidebar:
     st.title("ChatGPT 育児相談")
@@ -538,14 +568,21 @@ with st.sidebar:
     # セッションステートを初期化
     if 'chat_response' not in st.session_state:
         st.session_state.chat_response = ""
+    if 'scroll_trigger' not in st.session_state: #スクロールのために追加
+        st.session_state.scroll_trigger = 0 #初期化する
 
     # チャット入力
     user_input = st.text_area("", placeholder="入力してください...", key="chat_input", height=100)
     
+    def fire_and_scroll(text: str):
+        st.session_state.chat_response = get_chat_response(text)
+        st.session_state.scroll_trigger += 1 #毎回トリガー値が変わり、HTMLの中身が変わってJSが再実行される
+        st.rerun()
+
     if st.button("検索 🔎", key="send_button", use_container_width=True):
         if user_input:
-            st.session_state.chat_response = get_chat_response(user_input)
-            st.rerun() # 回答を表示するために再実行
+            fire_and_scroll(user_input)
+            
         else:
             st.warning("質問を入力してください。")
     
@@ -561,8 +598,7 @@ with st.sidebar:
     
     for question in questions:
         if st.button(question, key=question, use_container_width=True):
-            st.session_state.chat_response = get_chat_response(question)
-            st.rerun()
+            fire_and_scroll(question)
 
 
     
