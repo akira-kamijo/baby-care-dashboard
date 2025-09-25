@@ -314,13 +314,20 @@ if not supabase_url or not supabase_key:
 #supabaseクライアントの初期化
 supabase_client = create_client(supabase_url, supabase_key)
 
-#spabaseのデータベースを表示（仮）
-def get_supabase_data(table_name="睡眠テーブル"):
+#spabaseから最新ログを取得（カード3用）
+def get_supabase_data(table_name="baby_events"):
     """Supabaseからデータを取得する"""
     try:
-        # 最新のデータ順に3件取得
-        response = supabase_client.table(table_name).select("time, status").order("time", desc=True).limit(3).execute() #select("*")で全部、任意に指定できる
-        return response.data
+        response = supabase_client.table(table_name).select("datetime, type_jp").order("datetime", desc=True).limit(3).execute()
+        
+        # データをDataFrameに変換
+        df = pd.DataFrame(response.data)
+        
+        # 'datetime' 列を希望の形式にフォーマット
+        df['datetime'] = pd.to_datetime(df['datetime']).dt.strftime('%Y-%m-%d %H:%M')
+        
+        # DataFrameを辞書リストに戻す（st.dataframeにそのまま渡せる）
+        return df.to_dict('records')
     except Exception as e:
         st.error(f"データベースの読み込み中にエラーが発生しました: {e}")
         return []
@@ -476,8 +483,20 @@ def main():
     st.header("ベビーケア ダッシュボード")
     st.markdown("---")
 
-    # Supabaseから最新ログデータを取得
-    supabase_log_data = get_supabase_data(table_name="睡眠テーブル") # テーブル名を編集
+    # カード3用データ取得　Supabaseから最新ログデータを取得
+    supabase_log_data = get_supabase_data(table_name="baby_events") # テーブル名を編集
+    
+    # カード6用データ取得　Supabaseから最新の起床or就寝ログを取得
+    latest_sleep_log = None
+    try:
+        # type_slugが 'sleep_start' または 'sleep_end' の最新のログを1件取得
+        response = supabase_client.table("baby_events").select("datetime, type_slug").in_('type_slug', ['sleep_start', 'sleep_end']).order("datetime", desc=True).limit(1).execute()
+        if response.data:
+            latest_sleep_log = response.data[0]
+        else:
+            st.info("睡眠に関するデータがありません。")
+    except Exception as e:
+        st.error(f"睡眠データの読み込み中にエラーが発生しました: {e}")
     
     # サンプルデータの取得
     sleep_data, feeding_data, log_data = generate_sample_data()
@@ -550,25 +569,50 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         
     
-    # カード6: 今何してる
+    # カード6: 現在の起床/睡眠状態
     with cols[5]:
-        status_text, time_passed_str, log_time = get_status_and_time(log_data)
-        
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">今何してる</div>', unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div style="text-align: center;">
-                <div class="time-text">
-                    {log_time.strftime('%H:%M')}に{status_text}
+        if latest_sleep_log:
+            # datetimeをISO 8601形式からdatetimeオブジェクトに変換
+            log_time = datetime.fromisoformat(latest_sleep_log['datetime'].replace('Z', '+00:00'))
+            current_time = datetime.now(log_time.tzinfo) # 現在時刻も同じタイムゾーンに合わせる
+
+            # 経過時間を計算
+            delta = current_time - log_time
+            minutes_passed = int(delta.total_seconds() / 60)
+
+            # 状態と表示テキストを決定
+            status_text = ""
+            emoji = ""
+            if latest_sleep_log['type_slug'] == 'sleep_start':
+                status_text = "就寝"
+                emoji = "😴"
+            elif latest_sleep_log['type_slug'] == 'sleep_end':
+                status_text = "起床"
+                emoji = "🌞"
+
+            formatted_time_passed = f"{minutes_passed}分経過"
+
+            # HTMLで表示
+            st.markdown(
+                f"""
+                <div style="text-align: center;">
+                    <div class="time-text">
+                        {log_time.strftime('%H:%M')}に{status_text}
+                    </div>
+                    <div class="time-text">
+                        {formatted_time_passed}
+                    </div>
+                    <div style="font-size: 3rem; margin-top: 1rem;">
+                        {emoji}
+                    </div>
                 </div>
-                <div class="time-text">
-                    {time_passed_str}
-                </div>
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            st.info("睡眠のデータがありません。")
         st.markdown('</div>', unsafe_allow_html=True)
 
     #質問入力時、AIによる育児アドバイス部分に遷移するようにアンカーを設置。
