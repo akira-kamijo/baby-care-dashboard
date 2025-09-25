@@ -6,13 +6,14 @@ from datetime import datetime, timedelta
 import numpy as np
 from openai import OpenAI
 import os
+from supabase import create_client
 
 # ページ設定
 st.set_page_config(
     page_title="ベビーケア ダッシュボード",
     page_icon="👶",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded" #collapsed:折りたたみ expanded:展開
 )
 
 # カスタムCSS（レスポンシブ対応 + デスクトップ1画面表示）
@@ -209,6 +210,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+#---------------------------------------------------------
+# セキュリティ対応
+#---------------------------------------------------------
 #.env 読み込み（無ければ何もしない）
 try:
     from dotenv import load_dotenv
@@ -216,7 +220,9 @@ try:
 except Exception:
     pass
 
-
+#---------------------------------------------------------
+# OpenAI APIキー関連
+#---------------------------------------------------------
 # OpenAI APIキーの取得
 def get_api_key(env_key: str = "OPENAI_API_KEY") -> str | None:
     key = os.getenv(env_key)
@@ -287,14 +293,55 @@ def get_chat_response(
     except Exception as e:
         return f"エラーが発生しました: {e}"
 
+#---------------------------------------------------------
+# Supabase APIキー関連
+#---------------------------------------------------------
+# SupabaseのURLとAPIキーの取得
+def get_supabase_info():
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+    return url, key
 
+# Supabaseの情報を取得し、存在しない場合はエラーを表示して停止
+supabase_url, supabase_key = get_supabase_info()
+if not supabase_url or not supabase_key:
+    st.error(
+        "SupabaseのURLとキーが見つかりません。"
+        "\n\n.envファイルに SUPABASE_URL=\"...\" と SUPABASE_KEY=\"...\" を記載してください。"
+    )
+    st.stop()
+
+#supabaseクライアントの初期化
+supabase_client = create_client(supabase_url, supabase_key)
+
+#spabaseから最新ログを取得（カード3用）
+def get_supabase_data(table_name="baby_events"):
+    """Supabaseからデータを取得する"""
+    try:
+        response = supabase_client.table(table_name).select("datetime, type_jp").order("datetime", desc=True).limit(3).execute()
+        
+        # データをDataFrameに変換
+        df = pd.DataFrame(response.data)
+        
+        # 'datetime' 列を希望の形式にフォーマット
+        df['datetime'] = pd.to_datetime(df['datetime']).dt.strftime('%Y-%m-%d %H:%M')
+        
+        # DataFrameを辞書リストに戻す（st.dataframeにそのまま渡せる）
+        return df.to_dict('records')
+    except Exception as e:
+        st.error(f"データベースの読み込み中にエラーが発生しました: {e}")
+        return []
+
+#---------------------------------------------------------
+# データ生成・グラフ作成
+#---------------------------------------------------------
 # サンプルデータの生成
 def generate_sample_data():
     # 過去7日間のデータ
     dates = [datetime.now() - timedelta(days=i) for i in range(6, -1, -1)]
     
-    # おむつ替え回数のデータ
-    diaper_data = {
+    # 睡眠時間のデータ
+    sleep_data = {
         'date': dates,
         'count': [12.5, 10, 9.5, 13, 10, 10.5, 12]
     }
@@ -313,7 +360,7 @@ def generate_sample_data():
     
     ]
     
-    return diaper_data, feeding_data, log_data
+    return sleep_data, feeding_data, log_data
 
 # 円形プログレスバーの作成（レスポンシブ対応）
 def create_circular_progress(value, max_value, title, color="#FF6B47"):
@@ -428,15 +475,31 @@ def get_status_and_time(log_data):
         
     return status_text, time_passed_str, log_time
 
+#---------------------------------------------------------
 # メイン画面
+#---------------------------------------------------------
 def main():
     # ヘッダー
     st.header("ベビーケア ダッシュボード")
     st.markdown("---")
 
+    # カード3用データ取得　Supabaseから最新ログデータを取得
+    supabase_log_data = get_supabase_data(table_name="baby_events") # テーブル名を編集
+    
+    # カード6用データ取得　Supabaseから最新の起床or就寝ログを取得
+    latest_sleep_log = None
+    try:
+        # type_slugが 'sleep_start' または 'sleep_end' の最新のログを1件取得
+        response = supabase_client.table("baby_events").select("datetime, type_slug").in_('type_slug', ['sleep_start', 'sleep_end']).order("datetime", desc=True).limit(1).execute()
+        if response.data:
+            latest_sleep_log = response.data[0]
+        else:
+            st.info("睡眠に関するデータがありません。")
+    except Exception as e:
+        st.error(f"睡眠データの読み込み中にエラーが発生しました: {e}")
     
     # サンプルデータの取得
-    diaper_data, feeding_data, log_data = generate_sample_data()
+    sleep_data, feeding_data, log_data = generate_sample_data()
     
     # レスポンシブレイアウト設定
     # デスクトップ: 3列, タブレット: 2列, スマホ: 1列
@@ -459,7 +522,7 @@ def main():
     with cols[1]:
         st.markdown('<div class="card-title">　睡眠時間　前週平均比較</div>', unsafe_allow_html=True)
         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        fig_diaper_chart = create_bar_chart(diaper_data, "睡眠時間  前週平均比較", "#4A90E2")
+        fig_diaper_chart = create_bar_chart(sleep_data, "睡眠時間  前週平均比較", "#4A90E2")
         st.plotly_chart(fig_diaper_chart, use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -475,13 +538,20 @@ def main():
         unsafe_allow_html=True
         )
         
-        #時間とアクションだけ表示するように制御
-        sorted_logs = sorted(log_data, key=lambda x: x['time'], reverse=True)
-        for i, log in enumerate(sorted_logs, 1):
-            formatted_time = log['time'].strftime('%H:%M')
-            st.markdown(f'<div class="log-item">{i}. {formatted_time} {log["action"].split(",")[0]}</div>', unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+        ##時間とアクションだけ表示するように制御
+        #sorted_logs = sorted(log_data, key=lambda x: x['time'], reverse=True)
+        #for i, log in enumerate(sorted_logs, 1):
+        #    formatted_time = log['time'].strftime('%H:%M')
+        #    st.markdown(f'<div class="log-item">{i}. {formatted_time} {log["action"].split(",")[0]}</div>', unsafe_allow_html=True)
+        #st.markdown('</div></div>', unsafe_allow_html=True)
+        #st.markdown('</div>', unsafe_allow_html=True)
+
+        #Supabaseのデータベースを表示
+        data = get_supabase_data()
+        if data:
+            st.dataframe(data)
+        else:
+            st.info("データがありません。テーブル名を確認してください。")
 
     
     # カード4: 授乳経過時間
@@ -499,25 +569,50 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         
     
-    # カード6: 今何してる
+    # カード6: 現在の起床/睡眠状態
     with cols[5]:
-        status_text, time_passed_str, log_time = get_status_and_time(log_data)
-        
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">今何してる</div>', unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div style="text-align: center;">
-                <div class="time-text">
-                    {log_time.strftime('%H:%M')}に{status_text}
+        if latest_sleep_log:
+            # datetimeをISO 8601形式からdatetimeオブジェクトに変換
+            log_time = datetime.fromisoformat(latest_sleep_log['datetime'].replace('Z', '+00:00'))
+            current_time = datetime.now(log_time.tzinfo) # 現在時刻も同じタイムゾーンに合わせる
+
+            # 経過時間を計算
+            delta = current_time - log_time
+            minutes_passed = int(delta.total_seconds() / 60)
+
+            # 状態と表示テキストを決定
+            status_text = ""
+            emoji = ""
+            if latest_sleep_log['type_slug'] == 'sleep_start':
+                status_text = "就寝"
+                emoji = "😴"
+            elif latest_sleep_log['type_slug'] == 'sleep_end':
+                status_text = "起床"
+                emoji = "🌞"
+
+            formatted_time_passed = f"{minutes_passed}分経過"
+
+            # HTMLで表示
+            st.markdown(
+                f"""
+                <div style="text-align: center;">
+                    <div class="time-text">
+                        {log_time.strftime('%H:%M')}に{status_text}
+                    </div>
+                    <div class="time-text">
+                        {formatted_time_passed}
+                    </div>
+                    <div style="font-size: 3rem; margin-top: 1rem;">
+                        {emoji}
+                    </div>
                 </div>
-                <div class="time-text">
-                    {time_passed_str}
-                </div>
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            st.info("睡眠のデータがありません。")
         st.markdown('</div>', unsafe_allow_html=True)
 
     #質問入力時、AIによる育児アドバイス部分に遷移するようにアンカーを設置。
@@ -531,37 +626,10 @@ def main():
     else:
         st.info("サイドバーから質問を入力してください。")
 
-    if '_last_scrolled' not in st.session_state:
-        st.session_state['_last_scrolled'] = 0
-    #ボタン押下後にAIによる育児アドバイス部分までスクロールさせる処理
-    if st.session_state.get('scroll_trigger', 0) != st.session_state.get('_last_scrolled', 0):
-        trig = st.session_state['scroll_trigger']
-        st.components.v1.html(
-            f"""
-            <script>
-            (function(){{
-                const doc = window.parent.document;
-                function go(retry=0){{
-                    const anchor = doc.querySelector('#advice-anchor');
-                    if(!anchor){{
-                        if(retry<100) return setTimeout(()=>go(retry+1), 20);
-                        return;
-                    }}
-                    anchor.scrollIntoView({{ block: 'start', behavior: 'auto' }});
-                    requestAnimationFrame(()=>{{
-                        anchor.scrollIntoView({{ block: 'start', behavior: 'smooth' }});
-                    }});
-                }}
-                setTimeout(()=>go(0), 150);
-            }})();
-            </script>
-            <div data-scroll-trigger="{trig}" style="display:none"></div>
-            """,
-            height=1
-        )
-        # ← 消費したトリガーを記録（ここが大事）
-        st.session_state['_last_scrolled'] = st.session_state['scroll_trigger']
+    
+
 # サイドバー（質問・相談機能）
+#---------------------------------------------------------
 with st.sidebar:
     st.title("ChatGPT 育児相談")
     
