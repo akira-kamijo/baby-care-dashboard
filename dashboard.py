@@ -248,7 +248,9 @@ if not API_KEY:
 
 client = OpenAI(api_key=API_KEY)
 
+#---------------------------------------------------------
 #ChatGPTによる回答生成
+#---------------------------------------------------------
 #2025.9.22関
 #SYSTEM_PROMPTを記載してsystemメッセージ(役割設定)を一元管理
 SYSTEM_PROMPT = """\
@@ -314,7 +316,9 @@ if not supabase_url or not supabase_key:
 #supabaseクライアントの初期化
 supabase_client = create_client(supabase_url, supabase_key)
 
-#spabaseから最新ログを取得（カード3用）
+#---------------------------------------------------------
+#spabaseから最新ログを取得＜カード3＞
+#---------------------------------------------------------
 def get_supabase_data(table_name="baby_events"):
     """Supabaseからデータを取得する"""
     try:
@@ -331,6 +335,76 @@ def get_supabase_data(table_name="baby_events"):
     except Exception as e:
         st.error(f"データベースの読み込み中にエラーが発生しました: {e}")
         return []
+
+# ---------------------------------------------------------
+# おむつ経過時間計算＜カード1＞
+# ---------------------------------------------------------
+@st.cache_data(ttl=60) # 1分間キャッシュ
+def get_diaper_elapsed_time(table_name="baby_events"):
+    """
+    Supabaseから最新の「おしっこ」または「うんち」のイベント時刻を取得し、
+    現在時刻からの経過時間（分）を計算する。
+    """
+    try:
+        # type_slugが 'diaper_pee' (おしっこ) または 'diaper_poo' (うんち) の最新ログを1件取得
+        response = supabase_client.table(table_name).select("datetime, type_slug").in_('type_slug', ['diaper_pee', 'diaper_poo']).order("datetime", desc=True).limit(1).execute()
+        
+        if response.data:
+            latest_diaper_log = response.data[0]
+            # datetimeをISO 8601形式からタイムゾーン情報付きのdatetimeオブジェクトに変換
+            log_time = datetime.fromisoformat(latest_diaper_log['datetime'].replace('Z', '+00:00'))
+            
+            # 現在時刻も同じタイムゾーンに合わせるか、tz-awareにする（ここではシステムタイムゾーンを使用）
+            # Supabaseのtimestamp with timezoneはUTCで保存されることが多いため、それをローカル（日本時間）に変換して計算
+            current_time = datetime.now(log_time.tzinfo) # log_timeのタイムゾーン情報を使って現在時刻を取得
+            
+            # 経過時間を計算
+            delta = current_time - log_time
+            minutes_passed = int(delta.total_seconds() / 60)
+            
+            # 経過時間を返す
+            return minutes_passed
+        else:
+            # データがない場合は0分を返す
+            return 0
+    except Exception as e:
+        st.error(f"おむつデータの読み込み中にエラーが発生しました: {e}")
+        return 0
+
+# ---------------------------------------------------------
+# 授乳経過時間計算＜カード4＞
+# ---------------------------------------------------------
+@st.cache_data(ttl=60) # 1分間キャッシュ
+def get_feeding_elapsed_time(table_name="baby_events"):
+    """
+    Supabaseから最新の「授乳」イベント時刻を取得し、
+    現在時刻からの経過時間（分）を計算する。
+    """
+    try:
+        # type_slugが 'formula' (ミルク) または 'breastfeeding_start' (母乳)(仮) の最新ログを1件取得
+        # baby_eventsテーブルには’breastfeeding_start' (母乳)は無いので今後必要に応じて修正
+        response = supabase_client.table(table_name).select("datetime, type_slug").in_('type_slug', ['formula', 'breastfeeding_start']).order("datetime", desc=True).limit(1).execute()
+        
+        if response.data:
+            latest_feeding_log = response.data[0]
+            # datetimeをISO 8601形式からタイムゾーン情報付きのdatetimeオブジェクトに変換
+            log_time = datetime.fromisoformat(latest_feeding_log['datetime'].replace('Z', '+00:00'))
+            
+            # 現在時刻も同じタイムゾーンに合わせる
+            current_time = datetime.now(log_time.tzinfo)
+            
+            # 経過時間を計算
+            delta = current_time - log_time
+            minutes_passed = int(delta.total_seconds() / 60)
+            
+            # 経過時間を返す
+            return minutes_passed
+        else:
+            # データがない場合は0分を返す
+            return 0
+    except Exception as e:
+        st.error(f"授乳データの読み込み中にエラーが発生しました: {e}")
+        return 0
 
 #---------------------------------------------------------
 # データ生成・グラフ作成
@@ -363,14 +437,33 @@ def generate_sample_data():
     return sleep_data, feeding_data, log_data
 
 # 円形プログレスバーの作成（レスポンシブ対応）
-def create_circular_progress(value, max_value, title, color="#FF6B47"):
+def create_circular_progress(actual_value, max_value, color="#FF6B47"):
+    """
+    円形プログレスバーを作成し、中央に値を表示する
+    
+    Args:
+        actual_value (int): 実際の経過時間（分）。中央に表示される値。
+        max_value (int): グラフの上限（分）。プログレスバーが一周する値。
+        color (str): プログレスバーの色。
+    
+    Returns:
+        go.Figure: PlotlyのFigureオブジェクト。
+    """
+    
+    # グラフのオレンジ色の領域として表示する値。最大値を超えないように制限する。
+    display_value = min(actual_value, max_value)
+
+    #円形プログレスバー作成
     fig = go.Figure(data=[go.Pie(
-        values=[value, max_value - value],
+        values=[display_value, max_value - display_value],
         hole=.7,
-        marker_colors=[color, '#333333'],
+        marker_colors=[color, '#d3d3d3'],
         textinfo='none',
         showlegend=False,
-        hoverinfo='skip'
+        hoverinfo='skip',
+        direction='clockwise', # 時計回り 
+        sort=False, 
+        #rotation=90　←最初から12時の方向に開始されるので不要
     )])
     
     fig.update_layout(
@@ -381,10 +474,14 @@ def create_circular_progress(value, max_value, title, color="#FF6B47"):
         autosize=True,
         height=150,  # 高さを半分に設定
         annotations=[
-            dict(text=f'<b style="color:white; font-size:clamp(18px, 4vw, 24px)">{value}</b>', 
-                 x=0.5, y=0.58, font_size=20, showarrow=False),
-            dict(text=f'<span style="color:#ccc; font-size:clamp(10px, 2vw, 14px)">{title}</span>', 
-                 x=0.5, y=0.42, font_size=14, showarrow=False)
+            dict(
+                # 実際の経過時間 (actual_value) を表示
+                text=f'<span style="color:black; font-size:30px; font-weight:bold;">{actual_value}</span><br><span style="color:black; font-size:16px;"><br>分経過</span>',
+                x=0.5, 
+                y=0.5, 
+                showarrow=False,
+                align='center'
+            )
         ]
     )
     
@@ -483,8 +580,16 @@ def main():
     st.header("ベビーケア ダッシュボード")
     st.markdown("---")
 
+    # カード1用データ取得: 最新のおむつ替えからの経過時間を取得
+    elapsed_minutes = get_diaper_elapsed_time(table_name="baby_events")
+    DIAPER_MAX_MINUTES = 5000 # グラフの上限を180分に設定
+
     # カード3用データ取得　Supabaseから最新ログデータを取得
     supabase_log_data = get_supabase_data(table_name="baby_events") # テーブル名を編集
+
+    # カード4用データ取得: 最新の授乳からの経過時間を取得 (新規追加)
+    elapsed_minutes_feeding = get_feeding_elapsed_time(table_name="baby_events")
+    FEEDING_MAX_MINUTES = 5000 # 授乳グラフの上限を180分（3時間）に設定
     
     # カード6用データ取得　Supabaseから最新の起床or就寝ログを取得
     latest_sleep_log = None
@@ -515,7 +620,8 @@ def main():
     # カード1: おむつ経過時間
     with cols[0]:
         st.markdown('<div class="card-title">おむつ経過時間</div>', unsafe_allow_html=True)
-        fig_diaper_progress = create_circular_progress(124, 180, "XX分", "#FF6B47")
+        # 経過時間と上限値(例：180分)を渡す
+        fig_diaper_progress = create_circular_progress(elapsed_minutes, DIAPER_MAX_MINUTES, "#ff8c00")
         st.plotly_chart(fig_diaper_progress, use_container_width=True, config={'displayModeBar': False}, key="diaper_progress")
     
     # カード2: 睡眠時間 前週平均比較
@@ -557,7 +663,7 @@ def main():
     # カード4: 授乳経過時間
     with cols[3]:
         st.markdown('<div class="card-title">授乳経過時間</div>', unsafe_allow_html=True)
-        fig_feeding_progress = create_circular_progress(124, 180, "XX分", "#FF6B47")
+        fig_feeding_progress = create_circular_progress(elapsed_minutes_feeding, FEEDING_MAX_MINUTES, "#ff8c00") 
         st.plotly_chart(fig_feeding_progress, use_container_width=True, config={'displayModeBar': False}, key="feeding_progress")
     
     # カード5: ミルク量 前週平均比較
