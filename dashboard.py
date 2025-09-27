@@ -174,7 +174,7 @@ st.markdown("""
         }
         
         .metric-card, .chart-card, .log-card, {
-           
+        
             padding: 1rem;
             border-radius: 15px;
             
@@ -190,7 +190,7 @@ st.markdown("""
         
         
         .card-title {
-           
+        
             font-size: 1.1rem;
             margin-bottom: 0.8rem;
             text-align: center;
