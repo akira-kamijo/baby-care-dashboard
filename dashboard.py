@@ -13,7 +13,7 @@ st.set_page_config(
     page_title="ベビーケア ダッシュボード",
     page_icon="👶",
     layout="wide",
-    initial_sidebar_state="expanded" #collapsed:折りたたみ expanded:展開
+    initial_sidebar_state="collapsed" #collapsed:折りたたみ expanded:展開
 )
 
 # カスタムCSS（レスポンシブ対応 + デスクトップ1画面表示）
@@ -406,6 +406,163 @@ def get_feeding_elapsed_time(table_name="baby_events"):
         st.error(f"授乳データの読み込み中にエラーが発生しました: {e}")
         return 0
 
+# ---------------------------------------------------------
+# ミルク量の日ごとの累計値と前週平均の計算＜カード5＞
+# ---------------------------------------------------------
+@st.cache_data(ttl=60) # 1分間キャッシュ
+def get_feeding_summary_data(table_name="baby_events"):
+    """
+    Supabaseから直近2週間分のミルク量データを取得し、
+    日ごとの累計値（14日間）と前週の平均値を計算して返す。
+    """
+    try:
+        # 直近14日間のデータを取得（今週7日 + 前週7日）
+        fourteen_days_ago = datetime.now() - timedelta(days=14)
+        
+        # type_slugが 'formula' のログを取得
+        response = supabase_client.table(table_name).select("datetime, amount_ml, type_slug").eq('type_slug', 'formula').gte('datetime', fourteen_days_ago.isoformat()).order("datetime", desc=True).execute()
+        
+        if not response.data:
+            # グラフに表示するためのダミーデータ（14日間）を生成
+            dates_14 = [datetime.now().date() - timedelta(days=i) for i in range(13, -1, -1)]
+            df_display = pd.DataFrame({'date': dates_14, 'amount': [0] * 14})
+            return df_display, 0
+
+        df = pd.DataFrame(response.data)
+        # タイムゾーン変換後にtz-awareを削除
+        df['datetime'] = pd.to_datetime(df['datetime']).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None) 
+        df['date'] = df['datetime'].dt.date
+        df['amount_ml'] = pd.to_numeric(df['amount_ml'], errors='coerce').fillna(0)
+        
+        # 期間の定義
+        today = datetime.now().date()
+        
+        # 1. 表示する日付（直近14日間）のリストを作成
+        dates_14 = [today - timedelta(days=i) for i in range(13, -1, -1)]
+        
+        # 2. 直近14日間の日ごとの累計値を計算
+        all_period_summary = df.groupby('date')['amount_ml'].sum().reset_index()
+        all_period_summary.columns = ['date', 'amount']
+        
+        # 3. 直近14日間を表示用のDataFrameに結合し、データがない日は0とする
+        df_display = pd.DataFrame({'date': dates_14})
+        df_display = pd.merge(df_display, all_period_summary, on='date', how='left').fillna(0)
+        
+        # 4. 前週の平均値（前7日間）を計算
+        start_of_current_period = today - timedelta(days=6) # 直近7日間の開始日
+        start_of_last_period = start_of_current_period - timedelta(days=7) # 前週7日間の開始日
+        
+        # 前7日間 (前週扱い) のデータのみを抽出
+        df_last_period = df[(df['date'] < start_of_current_period) & (df['date'] >= start_of_last_period)]
+        
+        # 前7日間 (前週扱い) の日ごとの累計を計算
+        last_period_summary = df_last_period.groupby('date')['amount_ml'].sum()
+        
+        # 前週の平均値（日ごとの累計値の平均）
+        last_week_average = last_period_summary.mean() if not last_period_summary.empty else 0
+        
+        # create_bar_chartの形式に合わせて列名を修正
+        df_display.columns = ['date', 'amount']
+        df_display['date'] = df_display['date'].apply(lambda x: x.strftime('%m/%d'))
+        
+        return df_display, last_week_average
+        
+    except Exception as e:
+        st.error(f"ミルク量データの集計中にエラーが発生しました: {e}")
+        # エラー発生時はダミーデータを返す (14日間)
+        dates_14 = [datetime.now().date() - timedelta(days=i) for i in range(13, -1, -1)]
+        return pd.DataFrame({'date': dates_14, 'amount': [0] * 14}), 0
+
+# ---------------------------------------------------------
+# 睡眠時間の日ごとの累計値と前週平均の計算＜カード2＞
+# ---------------------------------------------------------
+@st.cache_data(ttl=60) # 1分間キャッシュ
+def get_sleep_summary_data(table_name="baby_events"):
+    """
+    Supabaseから直近2週間分の睡眠イベントを取得し、
+    日ごとの睡眠時間累計（14日間）と前週の平均値を計算して返す。
+    """
+    try:
+        # 1. データの取得
+        # 直近14日間のイベントだけだと、期間の開始前のsleep_startが欠ける可能性があるため、
+        # 余裕を持って過去15日間のデータを取得します。
+        fifteen_days_ago = datetime.now() - timedelta(days=15)
+        
+        # type_slugが 'sleep_start' または 'sleep_end' のログを取得
+        response = supabase_client.table(table_name).select("datetime, type_slug").in_('type_slug', ['sleep_start', 'sleep_end']).gte('datetime', fifteen_days_ago.isoformat()).order("datetime", desc=False).execute()
+        
+        if not response.data:
+            # データがない場合のダミーデータ（14日間）
+            dates_14 = [datetime.now().date() - timedelta(days=i) for i in range(13, -1, -1)]
+            df_display = pd.DataFrame({'date': dates_14, 'count': [0.0] * 14})
+            return df_display, 0.0
+
+        df = pd.DataFrame(response.data)
+        # タイムゾーン変換後にtz-awareを削除
+        df['datetime'] = pd.to_datetime(df['datetime']).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None) 
+        
+        # 2. 睡眠時間の計算 (sleep_start から sleep_end までのペアを見つける)
+        sleep_durations = []
+        i = 0
+        while i < len(df) - 1:
+            start_row = df.iloc[i]
+            end_row = df.iloc[i+1]
+            
+            # sleep_start から始まり、直後に sleep_end が続く場合のみ計算
+            if start_row['type_slug'] == 'sleep_start' and end_row['type_slug'] == 'sleep_end':
+                # 睡眠時間（時間単位）を計算
+                duration_hours = (end_row['datetime'] - start_row['datetime']).total_seconds() / 3600
+                
+                # 睡眠終了時の日付をキーとして保存
+                sleep_durations.append({
+                    'date': end_row['datetime'].date(), 
+                    'duration_hours': duration_hours
+                })
+                i += 2 # 次のペアへ
+            else:
+                # 'sleep_start' の次が 'sleep_start' (ログ抜け) または 'sleep_end' の次が 'sleep_start' ではない場合
+                # start_row が 'sleep_start' ではない場合、次の行に進む
+                # start_row が 'sleep_start' で end_row が 'sleep_start' の場合、start_rowをスキップして次の行に進む
+                i += 1 
+
+        df_durations = pd.DataFrame(sleep_durations)
+        
+        # 3. 日ごとの累計睡眠時間（時間）を計算
+        if df_durations.empty:
+            sleep_summary = pd.DataFrame()
+        else:
+            sleep_summary = df_durations.groupby('date')['duration_hours'].sum().reset_index()
+            sleep_summary.columns = ['date', 'count']
+
+        # 4. グラフ表示期間（直近14日間）を定義
+        today = datetime.now().date()
+        dates_14 = [today - timedelta(days=i) for i in range(13, -1, -1)]
+        
+        # 5. グラフ表示用DataFrameに結合し、データがない日は0とする
+        df_display = pd.DataFrame({'date': dates_14})
+        df_display = pd.merge(df_display, sleep_summary, on='date', how='left').fillna(0.0)
+        
+        # 6. 前週平均値の計算
+        start_of_current_period = today - timedelta(days=6) # 直近7日間の開始日
+        start_of_last_period = start_of_current_period - timedelta(days=7) # 前週7日間の開始日
+        
+        # 前7日間 (前週扱い) のデータのみを抽出
+        df_last_period_summary = sleep_summary[(sleep_summary['date'] < start_of_current_period) & (sleep_summary['date'] >= start_of_last_period)]
+        
+        # 前週の平均値（日ごとの累計睡眠時間の平均）
+        last_week_average = df_last_period_summary['count'].mean() if not df_last_period_summary.empty else 0.0
+        
+        # 7. 日付を「月/日」形式の文字列に変換 (PlotlyのX軸表示を確実にするため)
+        df_display['date'] = df_display['date'].apply(lambda x: x.strftime('%m/%d'))
+        
+        return df_display, last_week_average
+        
+    except Exception as e:
+        st.error(f"睡眠データの集計中にエラーが発生しました: {e}")
+        # エラー発生時はダミーデータを返す (14日間)
+        dates_14 = [datetime.now().date() - timedelta(days=i) for i in range(13, -1, -1)]
+        return pd.DataFrame({'date': dates_14, 'count': [0.0] * 14}), 0.0
+
 #---------------------------------------------------------
 # データ生成・グラフ作成
 #---------------------------------------------------------
@@ -436,7 +593,7 @@ def generate_sample_data():
     
     return sleep_data, feeding_data, log_data
 
-# 円形プログレスバーの作成（レスポンシブ対応）
+# 円形プログレスバーの作成（レスポンシブ対応）＜カード1・4＞
 def create_circular_progress(actual_value, max_value, color="#FF6B47"):
     """
     円形プログレスバーを作成し、中央に値を表示する
@@ -487,16 +644,33 @@ def create_circular_progress(actual_value, max_value, color="#FF6B47"):
     
     return fig
 
-# 棒グラフの作成（デスクトップ1画面対応）
-def create_bar_chart(data, title, color="#4A90E2"):
+# 棒グラフの作成（デスクトップ1画面対応）＜カード2・5＞
+def create_bar_chart(data, title, color="#4A90E2", average_value=None): 
     df = pd.DataFrame(data)
+
+    # DataFrameの2列目（index 1）をデータの値の列とする
+    value_column = df.columns[1] 
     
+    # 日付列を 'date' に統一する (get_feeding_summary_dataが出力する形式に合わせる)
+    if 'date' not in df.columns:
+        df.columns = ['date', value_column]
+    
+    num_days = len(df)
+    x_range_indices = None
+    
+    # データが7日分以上ある場合、直近7日間の範囲を設定する
+    if num_days >= 7:
+        # PlotlyはX軸をカテゴリカルデータとして扱うため、インデックスで範囲を指定する。
+        # 直近7日間はインデックスの (num_days - 7) から (num_days - 1) に対応。
+        # グラフの棒が途切れないように、開始と終了のインデックスに +/- 0.5 の調整を加える。
+        x_range_indices = [num_days - 7 - 0.5, num_days - 1 + 0.5]
+
     # 棒グラフの作成
     bar_fig = go.Figure(data=[
         go.Bar(
             x=df['date'],
-            y=df[df.columns[1]],
-            text=df[df.columns[1]],
+            y=df[value_column], 
+            text=df[value_column].apply(lambda x: f'{int(x)}' if x > 0 else ''), # 0は表示しない
             marker_color=color,
             textposition='inside',
             insidetextanchor='end',
@@ -506,21 +680,34 @@ def create_bar_chart(data, title, color="#4A90E2"):
         )
     ])
     
-    # 前週平均線の作成
-    weekly_average = df[df.columns[1]].mean()
-    line_fig = go.Figure(data=[
-        go.Scatter(
-            x=df['date'],
-            y=[weekly_average] * len(df),
-            mode='lines',
-            line=dict(color='red', width=2),
-            name='前週平均',
-            showlegend=False # 凡例を非表示にする
-        )
-    ])
-    
-    # 棒グラフと折れ線グラフを統合
-    final_fig = go.Figure(data=bar_fig.data + line_fig.data)
+    # 前週平均線の作成 (average_value が渡された場合にのみ実行)
+    if average_value is not None and average_value > 0:
+        # グラフに表示されている日付リストを取得
+        dates = df['date'].tolist()
+        
+        # 直近7日間の日付のみを抽出 (最後の7つ)
+        # 前週の平均値を今週の棒グラフ領域に表示したい
+        this_week_dates = dates[-7:] # 例: 9/21〜9/27
+        
+        # 直近7日間の日付に対応する平均値のリストを作成
+        # 前週のデータには線を引かないように、直近7日分だけ平均値、残りはNone(Plotlyは無視する)を設定
+        y_line = [None] * (len(dates) - 7) + [average_value] * 7
+        
+        line_fig = go.Figure(data=[
+            go.Scatter(
+                x=df['date'],
+                y=y_line, # ← 14日間のうち直近7日間にのみ平均値を設定
+                mode='lines',
+                line=dict(color='red', width=2),
+                name='前週平均',
+                showlegend=False 
+            )
+        ])
+        # 棒グラフと折れ線グラフを統合
+        final_fig = go.Figure(data=bar_fig.data + line_fig.data)
+    else:
+        final_fig = bar_fig # 平均値がない場合は棒グラフのみ
+        
 
     final_fig.update_layout(
         plot_bgcolor='rgba(0,0,0,0)',
@@ -529,15 +716,20 @@ def create_bar_chart(data, title, color="#4A90E2"):
         xaxis=dict(
             showgrid=False,
             zeroline=False,
-            tickformat='%m/%d',
+            #tickformat='%m/%d',
             title="",
-            tickfont=dict(size=9)
+            tickfont=dict(size=9),
+            range=x_range_indices,# ★★★ X軸の表示範囲を適用 ★★★
+            rangeslider=dict(visible=False), 
+            type='category' # X軸をカテゴリカルとして扱う
         ),
         yaxis=dict(
             showgrid=False,
             zeroline=False,
             title="",
-            tickfont=dict(size=9)
+            tickfont=dict(size=9),
+            # Y軸の最大値を調整して平均線が入りやすいようにする (平均値が存在する場合)
+            range=[0, df[value_column].max() * 1.1 if average_value is None or df[value_column].max() * 1.1 > average_value * 1.1 else average_value * 1.1]
         ),
         margin=dict(t=5, b=5, l=15, r=15),
         autosize=True,
@@ -582,14 +774,20 @@ def main():
 
     # カード1用データ取得: 最新のおむつ替えからの経過時間を取得
     elapsed_minutes = get_diaper_elapsed_time(table_name="baby_events")
-    DIAPER_MAX_MINUTES = 5000 # グラフの上限を180分に設定
+    DIAPER_MAX_MINUTES = 10000 # グラフの上限を180分に設定
+
+    # カード2用データ取得: 睡眠時間の日ごとの累計と前週平均 (新規追加)
+    sleep_chart_data, last_week_avg_sleep = get_sleep_summary_data(table_name="baby_events")
 
     # カード3用データ取得　Supabaseから最新ログデータを取得
     supabase_log_data = get_supabase_data(table_name="baby_events") # テーブル名を編集
 
-    # カード4用データ取得: 最新の授乳からの経過時間を取得 (新規追加)
+    # カード4用データ取得: 最新の授乳からの経過時間を取得
     elapsed_minutes_feeding = get_feeding_elapsed_time(table_name="baby_events")
-    FEEDING_MAX_MINUTES = 5000 # 授乳グラフの上限を180分（3時間）に設定
+    FEEDING_MAX_MINUTES = 10000 # 授乳グラフの上限を180分（3時間）に設定
+
+    # カード5用データ取得: ミルク量の日ごとの累計と前週平均 (新規追加)
+    feeding_chart_data, last_week_avg_amount = get_feeding_summary_data(table_name="baby_events")
     
     # カード6用データ取得　Supabaseから最新の起床or就寝ログを取得
     latest_sleep_log = None
@@ -626,10 +824,12 @@ def main():
     
     # カード2: 睡眠時間 前週平均比較
     with cols[1]:
-        st.markdown('<div class="card-title">　睡眠時間　前週平均比較</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">睡眠時間 (h) 前週平均比較</div>', unsafe_allow_html=True)
         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        fig_diaper_chart = create_bar_chart(sleep_data, "睡眠時間  前週平均比較", "#4A90E2")
-        st.plotly_chart(fig_diaper_chart, use_container_width=True, config={'displayModeBar': False})
+        
+        fig_sleep_chart = create_bar_chart(sleep_chart_data, "睡眠時間 前週平均比較", "#4A90E2", last_week_avg_sleep)
+        st.plotly_chart(fig_sleep_chart, use_container_width=True, config={'displayModeBar': False})
+        
         st.markdown('</div>', unsafe_allow_html=True)
         
     
@@ -670,7 +870,8 @@ def main():
     with cols[4]:
         st.markdown('<div class="card-title">　ミルク量(ml)　前週平均比較</div>', unsafe_allow_html=True)
         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        fig_feeding_chart = create_bar_chart(feeding_data, "ミルク量  前週平均比較", "#4A90E2")
+        # === 修正点: 動的データと前週平均を渡す ===
+        fig_feeding_chart = create_bar_chart(feeding_chart_data, "ミルク量  前週平均比較", "#4A90E2", last_week_avg_amount)
         st.plotly_chart(fig_feeding_chart, use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -733,7 +934,7 @@ def main():
         st.info("サイドバーから質問を入力してください。")
 
     
-
+#---------------------------------------------------------
 # サイドバー（質問・相談機能）
 #---------------------------------------------------------
 with st.sidebar:
