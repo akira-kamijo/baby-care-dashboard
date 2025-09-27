@@ -8,6 +8,7 @@ from openai import OpenAI
 import os
 from supabase import create_client
 import pytz
+import json #GPTでの分析の際にJson化させるため記載
 
 # ページ設定
 st.set_page_config(
@@ -570,6 +571,187 @@ def get_feeding_summary_data(table_name="baby_events"):
         dates_14 = [datetime.now().date() - timedelta(days=i) for i in range(13, -1, -1)]
         return pd.DataFrame({'date': dates_14, 'amount': [0] * 14}), 0
 
+# ---------------------------------------------------------
+# 既存KPIから派生統計を計算 → 日常語ラベル化（色バッジは使わない）
+# （DB集計関数の直後に置く：グラフ関数の前）
+# ---------------------------------------------------------
+def _series_stats(values: list[float]) -> dict:
+    arr = np.array(values, dtype=float)
+    if arr.size == 0:
+        return {"mean": 0.0, "std": 0.0, "trend_slope_per_day": 0.0}
+    x = np.arange(arr.size, dtype=float)
+    slope = float(np.polyfit(x, arr, 1)[0]) if arr.size >= 2 else 0.0
+    return {
+        "mean": float(arr.mean()),
+        "std": float(arr.std(ddof=0)),
+        "trend_slope_per_day": slope,
+    }
+
+def _qualitative_labels(mean: float, std: float, slope: float, unit: str,
+                        abs_threshold: float | None = None) -> dict:
+    """
+    統計を“日常語”に変換（色やバッジは使わない）。
+    - 変動（CV=std/mean）: 『ほぼ毎日おなじ / 日によって少しちがう / 日によってかなりちがう』
+      目安幅も一緒に返す（±10%/±25% を実数化）
+    - 傾き: 1日あたり平均比±5%を目安に『少し増えつつある / 少し減りつつある / だいたい同じ』
+    """
+    eps = 1e-9
+    cv = std / (abs(mean) + eps)
+    band10 = abs(mean) * 0.10
+    band25 = abs(mean) * 0.25
+
+    if cv < 0.10:
+        variability = "ほぼ毎日おなじ"
+        variability_phrase = f"日ごとの差は小さめ（目安: ±{band10:.1f}{unit}以内）。"
+    elif cv < 0.25:
+        variability = "日によって少しちがう"
+        variability_phrase = f"日ごとの差は中くらい（目安: ±{band10:.1f}〜±{band25:.1f}{unit}）。"
+    else:
+        variability = "日によってかなりちがう"
+        variability_phrase = f"日ごとの差は大きめ（目安: ±{band25:.1f}{unit}以上）。"
+
+    rel = abs(slope) / (abs(mean) + eps) if mean else 0.0
+    use_abs = abs_threshold is not None and abs(slope) >= abs_threshold
+    use_rel = rel >= 0.05  # 5%/日を目安
+
+    if (slope > 0) and (use_abs or use_rel):
+        trend = "少し増えつつある"
+        trend_phrase = f"ここ数日は{unit}がゆるやかに増えています。"
+    elif (slope < 0) and (use_abs or use_rel):
+        trend = "少し減りつつある"
+        trend_phrase = f"ここ数日は{unit}がゆるやかに減っています。"
+    else:
+        trend = "だいたい同じ"
+        trend_phrase = f"ここ数日は{unit}は大きく変わっていません。"
+
+    return {
+        "variability": variability,
+        "variability_phrase": variability_phrase,
+        "trend": trend,
+        "trend_phrase": trend_phrase,
+        "guideline_band_10pct": band10,
+        "guideline_band_25pct": band25,
+    }
+# ---------------------------------------------------------
+# GPTプロンプト組み立て（KPI_JSON同梱）と質問別インストラクション・共通呼び出し
+# ---------------------------------------------------------
+def build_kpi_payload_for_gpt() -> dict:
+    # 既存の集計関数を再利用（ダッシュボードと同条件）
+    sleep_chart_data, last_week_avg_sleep = get_sleep_summary_data(table_name="baby_events")
+    feeding_chart_data, last_week_avg_amount = get_feeding_summary_data(table_name="baby_events")
+
+    diaper_elapsed = get_diaper_elapsed_time(table_name="baby_events")
+    feeding_elapsed = get_feeding_elapsed_time(table_name="baby_events")
+    if isinstance(diaper_elapsed, tuple): _, diaper_elapsed = diaper_elapsed
+    if isinstance(feeding_elapsed, tuple): _, feeding_elapsed = feeding_elapsed
+
+    sleep_df = pd.DataFrame(sleep_chart_data).tail(7)
+    feed_df  = pd.DataFrame(feeding_chart_data).tail(7)
+    sleep_val = sleep_df.columns[1] if len(sleep_df.columns) > 1 else None
+    feed_val  = feed_df.columns[1]  if len(feed_df.columns)  > 1 else None
+
+    sleep_vals = sleep_df[sleep_val].fillna(0).astype(float).tolist() if sleep_val else []
+    milk_vals  = feed_df[feed_val].fillna(0).astype(float).tolist() if feed_val else []
+
+    sleep_stats = _series_stats(sleep_vals)
+    milk_stats  = _series_stats(milk_vals)
+
+    # “日常語”ラベル（睡眠は0.2h/日、ミルクは20ml/日を絶対閾値の目安）
+    sleep_labels = _qualitative_labels(
+        mean=sleep_stats["mean"], std=sleep_stats["std"], slope=sleep_stats["trend_slope_per_day"],
+        unit="時間/日", abs_threshold=0.2
+    )
+    milk_labels = _qualitative_labels(
+        mean=milk_stats["mean"], std=milk_stats["std"], slope=milk_stats["trend_slope_per_day"],
+        unit="ml/日", abs_threshold=20.0
+    )
+
+    def bucket_minutes(m: int) -> str:
+        if m is None: return "unknown"
+        return "0-90" if m < 90 else "90-180" if m < 180 else "180+"
+
+    return {
+        "units": {
+            "sleep_hours_per_day": "hours",
+            "milk_amount_per_day": "ml",
+            "elapsed_since_diaper": "minutes",
+            "elapsed_since_feeding": "minutes",
+        },
+        "elapsed": {
+            "diaper_minutes": int(diaper_elapsed or 0),
+            "feeding_minutes": int(feeding_elapsed or 0),
+            "diaper_bucket": bucket_minutes(int(diaper_elapsed or 0)),
+            "feeding_bucket": bucket_minutes(int(feeding_elapsed or 0)),
+        },
+        "sleep_last7": [
+            {"date": str(r["date"]), "hours": float(r[sleep_val] or 0)}
+            for _, r in sleep_df.iterrows()
+        ],
+        "sleep_prev_week_avg_hours": float(round(float(last_week_avg_sleep or 0), 2)),
+        "sleep_last7_stats": sleep_stats,
+        "sleep_last7_labels": sleep_labels,   # ← 日常語ラベル（色情報なし）
+        "milk_last7": [
+            {"date": str(r["date"]), "ml": float(r[feed_val] or 0)}
+            for _, r in feed_df.iterrows()
+        ],
+        "milk_prev_week_avg_ml": float(round(float(last_week_avg_amount or 0), 2)),
+        "milk_last7_stats": milk_stats,
+        "milk_last7_labels": milk_labels,     # ← 日常語ラベル（色情報なし）
+        "notes": "Derived stats and plain-language labels are computed on last7 only.",
+    }
+
+def build_analysis_instruction(question: str) -> str:
+    # ※ 統計用語や追加ログ要求を出さない運用
+    common = (
+        "※ 追加のデータ収集や新たなログの提案は行わないでください。"
+        "KPI_JSONの範囲だけで分析し、実行負荷の小さい『低後悔』アクションのみ提案してください。"
+        "専門用語（標準偏差・相関・傾き など）は使わず、"
+        "KPI_JSONに含まれる『…_labels』の短い言い回し（例: ほぼ毎日おなじ/日によって少しちがう/日によってかなりちがう、少し増えつつある/少し減りつつある/だいたい同じ）で説明してください。"
+    )
+    if "睡眠パターン" in question:
+        return (
+            "直近7日の睡眠合計（hours/day）と前週平均の差、ムラの大きさ、最近の流れを評価し、"
+            "就寝時間の固定や就寝前ルーティンなど、低負荷の対策を提案してください。"
+            + common
+        )
+    if "授乳間隔" in question:
+        return (
+            "厳密な間隔は算出せず、『授乳からの経過分』とミルク量の推移/ムラ/最近の流れから、"
+            "保守的に過剰/不足の兆候を評価してください。"
+            + common
+        )
+    if "ミルク量" in question:
+        return (
+            "直近7日のミルク量と前週平均の差、ムラの大きさ、最近の流れを評価し、"
+            "配分の工夫など低負荷の提案を行ってください。"
+            + common
+        )
+    if "おむつ替え" in question:
+        return (
+            "『おむつからの経過分』を主指標に替えタイミングの妥当性を評価し、"
+            "外出前チェックや最大間隔の目安など低負荷の運用を示してください。"
+            + common
+        )
+    return "KPI_JSONに基づく分析と、低負荷なNext Actionのみを提示してください。" + common
+
+def ask_gpt_with_optional_kpi(user_question: str, include_kpi: bool = True) -> str:
+    """
+    SYSTEM_PROMPT / FORMAT_HINT は既存 get_chat_response のデフォルトで踏襲。
+    include_kpi=True なら KPI_JSON を同梱。
+    """
+    parts = []
+    parts.append("以下のユーザー質問に回答し、その後で与えられたKPI_JSON（あれば）を一次ソースとして事実ベースの分析と示唆を述べてください。")
+    parts.append("\n[ユーザー質問]\n" + user_question)
+
+    if include_kpi:
+        kpi_json = json.dumps(build_kpi_payload_for_gpt(), ensure_ascii=False)
+        instruction = build_analysis_instruction(user_question)
+        parts.append("\n[分析タスク]\n" + instruction)
+        parts.append("\n[KPI_JSON]\n" + kpi_json)
+
+    parts.append("\n出力フォーマットは指定の形式（SYSTEM/FORMAT_HINT）に従ってください。")
+    prompt = "\n".join(parts)
+    return get_chat_response(prompt)  # 既存のSYSTEM_PROMPT/FORMAT_HINTが効く
 
 
 #---------------------------------------------------------
@@ -956,14 +1138,14 @@ with st.sidebar:
     # チャット入力
     user_input = st.text_area("", placeholder="入力してください...", key="chat_input", height=100)
     
-    def fire_and_scroll(text: str):
-        st.session_state.chat_response = get_chat_response(text)
-        st.session_state.scroll_trigger += 1 #毎回トリガー値が変わり、HTMLの中身が変わってJSが再実行される
+    def fire_and_scroll(text: str, include_kpi: bool = True):
+        st.session_state.chat_response = ask_gpt_with_optional_kpi(text, include_kpi=include_kpi)
+        st.session_state.scroll_trigger = st.session_state.get("scroll_trigger", 0) + 1#毎回トリガー値が変わり、HTMLの中身が変わってJSが再実行される
         st.rerun()
 
     if st.button("検索 🔎", key="send_button", use_container_width=True):
-        if user_input:
-            fire_and_scroll(user_input)
+        if user_input and user_input.strip():
+            fire_and_scroll(user_input.strip(),include_kpi=True)
             
         else:
             st.warning("質問を入力してください。")
@@ -975,12 +1157,12 @@ with st.sidebar:
         "睡眠パターンを分析して",
         "授乳間隔を分析して", 
         "おむつ替えタイミングを分析して",
-        "夜泣きの対処法を教えて"
+        "ミルク量を分析して"
     ]
     
-    for question in questions:
-        if st.button(question, key=question, use_container_width=True):
-            fire_and_scroll(question)
+    for idx, question in enumerate(questions):
+        if st.button(question, key=f"quick_q_{idx}", use_container_width=True):
+            fire_and_scroll(question, include_kpi=True)
 
 
     
