@@ -908,6 +908,38 @@ def main():
     else:
         st.info("サイドバーから質問を入力してください。")
 
+    if '_last_scrolled' not in st.session_state:
+        st.session_state['_last_scrolled'] = 0
+    #ボタン押下後にAIによる育児アドバイス部分までスクロールさせる処理
+    if st.session_state.get('scroll_trigger', 0) != st.session_state.get('_last_scrolled', 0):
+        trig = st.session_state['scroll_trigger']
+        st.components.v1.html(
+            f"""
+            <script>
+            (function(){{
+                const doc = window.parent.document;
+                function go(retry=0){{
+                    const anchor = doc.querySelector('#advice-anchor');
+                    if(!anchor){{
+                        if(retry<100) return setTimeout(()=>go(retry+1),20);
+                        return;
+                    }}
+                    anchor.scrollIntoView({{ block: 'start', behavior: 'auto' }});
+                    requestAnimationFrame(()=>{{
+                        anchor.scrollIntoView({{ block: 'start', behavior: 'smooth' }});
+                    }});
+                }}
+                setTimeout(()=>go(0), 150);
+            }})();
+            </script>
+            <div data-scroll-trigger="{trig}" style="display:none"></div>
+            """,
+            height=1
+
+        )
+        #消費したトリガーを記録
+        st.session_state['_last_scrolled'] = st.session_state['scroll_trigger']
+
     
 #---------------------------------------------------------
 # サイドバー（質問・相談機能）
