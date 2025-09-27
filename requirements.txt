@@ -2,5 +2,7 @@ streamlit
 plotly 
 pandas 
 numpy
-datetime
-timedelta
+openai
+python-dotenv 
+supabase-py
+pytz
