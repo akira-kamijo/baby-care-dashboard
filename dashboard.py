@@ -1202,6 +1202,7 @@ def main():
 #---------------------------------------------------------
 with st.sidebar:
     st.title("ChatGPT 育児相談")
+    st.subheader("自由質問") 
     
     # セッションステートを初期化
     if 'chat_response' not in st.session_state:
@@ -1210,7 +1211,7 @@ with st.sidebar:
         st.session_state.scroll_trigger = 0 #初期化する
 
     # チャット入力
-    user_input = st.text_area("", placeholder="入力してください...", key="chat_input", height=100)
+    user_input = st.text_area("", placeholder="入力してください...", key="chat_input", height=150)
     
     def fire_and_scroll(text: str, include_kpi: bool = True):
         st.session_state.chat_response = ask_gpt_with_optional_kpi(text, include_kpi=include_kpi)
@@ -1224,8 +1225,9 @@ with st.sidebar:
         else:
             st.warning("質問を入力してください。")
     
-    # よく使う質問のボタン
-    st.subheader("よく使う質問")
+    # ダッシュボード分析のボタン
+    st.subheader("") #スペース
+    st.subheader("ダッシュボード分析") #よく使う質問→ダッシュボード分析
     
     questions = [
         "睡眠パターンを分析して",
