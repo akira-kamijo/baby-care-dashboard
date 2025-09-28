@@ -7,7 +7,7 @@ import numpy as np
 from openai import OpenAI
 import os
 from supabase import create_client
-import pytz
+import pytz #タイムゾーンデータベースを提供するライブラリ
 import json #GPTでの分析の際にJson化させるため記載
 
 # ページ設定
@@ -175,7 +175,7 @@ st.markdown("""
         }
         
         .metric-card, .chart-card, .log-card, {
-           
+        
             padding: 1rem;
             border-radius: 15px;
             
@@ -191,7 +191,7 @@ st.markdown("""
         
         
         .card-title {
-           
+        
             font-size: 1.1rem;
             margin-bottom: 0.8rem;
             text-align: center;
@@ -318,9 +318,13 @@ if not supabase_url or not supabase_key:
 #supabaseクライアントの初期化
 supabase_client = create_client(supabase_url, supabase_key)
 
+# ---------------------------------------------------------
+# タイムゾーン定義
+# ---------------------------------------------------------
+JST = pytz.timezone('Asia/Tokyo')
 
 # ---------------------------------------------------------
-# spabaseからおむつ経過時間計算＜カード1＞
+# supabaseからおむつ替え経過時間計算＜カード1＞
 # ---------------------------------------------------------
 @st.cache_data(ttl=60) # 1分間キャッシュ
 def get_diaper_elapsed_time(table_name="baby_events"):
@@ -336,14 +340,14 @@ def get_diaper_elapsed_time(table_name="baby_events"):
             latest_diaper_log = response.data[0]
             # 1. ログ時刻をタイムゾーン付きで読み込み、JSTに変換する
             log_time_utc = datetime.fromisoformat(latest_diaper_log['datetime'])
-            # タイムゾーン情報がない場合は、ここでUTCを付与する必要があるが、
-            # Supabaseから返されるデータは通常タイムゾーン付きなので、tz_convertのみでOK
+            
+            # 2. UTCからJSTに変換する
             log_time_jst = log_time_utc.astimezone(pytz.timezone('Asia/Tokyo'))
             
-            # 2. 現在時刻をJSTで取得する (pytzが必要)
+            # 3. 現在時刻をJSTで取得する (上記 1.で定義した JST を使用)
             current_time_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
             
-            # 3. JST同士で経過時間を計算
+            # 4. JST同士で経過時間を計算
             delta = current_time_jst - log_time_jst
             minutes_passed = int(delta.total_seconds() / 60)
             
@@ -357,7 +361,7 @@ def get_diaper_elapsed_time(table_name="baby_events"):
         return 0
 
 # ---------------------------------------------------------
-# spabaseから睡眠時間の日ごとの累計値と前週平均の計算＜カード2＞
+# supabaseから睡眠時間の日ごとの累計値と前週平均の計算＜カード2＞
 # ---------------------------------------------------------
 @st.cache_data(ttl=60) # 1分間キャッシュ
 def get_sleep_summary_data(table_name="baby_events"):
@@ -382,9 +386,9 @@ def get_sleep_summary_data(table_name="baby_events"):
 
         df = pd.DataFrame(response.data)
         # タイムゾーン変換
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        df['datetime'] = df['datetime'].dt.tz_convert('Asia/Tokyo')
-        df['date'] = df['datetime'].dt.date 
+        df['datetime'] = pd.to_datetime(df['datetime']) # UTC情報付きとして読み込む
+        df['datetime'] = df['datetime'].dt.tz_convert('Asia/Tokyo')  # UTCからJST (Asia/Tokyo) に変換
+        df['date'] = df['datetime'].dt.date  # 日付列を作成 (JSTベースの日付になる)
         
         # 2. 睡眠時間の計算 (sleep_start から sleep_end までのペアを見つける)
         sleep_durations = []
@@ -449,28 +453,38 @@ def get_sleep_summary_data(table_name="baby_events"):
         return pd.DataFrame({'date': dates_14, 'count': [0.0] * 14}), 0.0
 
 #---------------------------------------------------------
-#spabaseから最新ログを取得＜カード3＞
+#supabaseから最新ログを取得＜カード3＞
 #---------------------------------------------------------
+@st.cache_data(ttl=60) # 1分間キャッシュ
 def get_supabase_data(table_name="baby_events"):
-    """Supabaseからデータを取得する"""
+    """Supabaseからデータを取得し、JSTに変換して返す"""
     try:
         response = supabase_client.table(table_name).select("datetime, type_jp").order("datetime", desc=True).limit(3).execute()
         
         # データをDataFrameに変換
         df = pd.DataFrame(response.data)
         
-        # 'datetime' 列を希望の形式にフォーマット
-        df['datetime'] = pd.to_datetime(df['datetime']).dt.strftime('%Y-%m-%d %H:%M')
-        
+        # JST変換と表示フォーマット
+        if not df.empty and 'datetime' in df.columns:
+            # 1. UTC情報付きとして読み込み
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            
+            # 2. UTCからJST (Asia/Tokyo) に変換
+            df['datetime'] = df['datetime'].dt.tz_convert('Asia/Tokyo')
+            
+            # 3. 表示用の形式にフォーマット (タイムゾーン情報を削除して見やすくする)
+            df['datetime'] = df['datetime'].dt.strftime('%Y-%m-%d %H:%M')
+            
         # DataFrameを辞書リストに戻す（st.dataframeにそのまま渡せる）
         return df.to_dict('records')
+    
     except Exception as e:
         st.error(f"データベースの読み込み中にエラーが発生しました: {e}")
         return []
 
 
 # ---------------------------------------------------------
-# spabaseから授乳経過時間計算＜カード4＞
+# supabaseから授乳経過時間計算＜カード4＞
 # ---------------------------------------------------------
 @st.cache_data(ttl=60) # 1分間キャッシュ
 def get_feeding_elapsed_time(table_name="baby_events"):
@@ -505,7 +519,7 @@ def get_feeding_elapsed_time(table_name="baby_events"):
         return 0
 
 # ---------------------------------------------------------
-# spabaseからミルク量の日ごとの累計値と前週平均の計算＜カード5＞
+# supabaseからミルク量の日ごとの累計値と前週平均の計算＜カード5＞
 # ---------------------------------------------------------
 @st.cache_data(ttl=60) # 1分間キャッシュ
 def get_feeding_summary_data(table_name="baby_events"):
@@ -570,6 +584,78 @@ def get_feeding_summary_data(table_name="baby_events"):
         # エラー発生時はダミーデータを返す (14日間)
         dates_14 = [datetime.now().date() - timedelta(days=i) for i in range(13, -1, -1)]
         return pd.DataFrame({'date': dates_14, 'amount': [0] * 14}), 0
+
+# ---------------------------------------------------------
+# supabaseから最新の睡眠ステータスログを取得・計算＜カード6用＞
+# ---------------------------------------------------------
+@st.cache_data(ttl=60) # 1分間キャッシュ
+def get_sleep_status_log(table_name="baby_events"):
+    """
+    Supabaseから最新の「sleep_start」または「sleep_end」ログを1件取得する。
+    status/time計算のため、datetime, type_jp, type_slugを含める。
+    """
+    try:
+        # type_slugが 'sleep_start' または 'sleep_end' の最新ログを1件取得
+        response = supabase_client.table(table_name).select("datetime, type_jp, type_slug").in_('type_slug', ['sleep_start', 'sleep_end']).order("datetime", desc=True).limit(1).execute()
+        
+        if response.data:
+            # get_status_and_time に渡すため、辞書のリスト形式で返す
+            return response.data 
+        else:
+            # データがない場合は空のリストを返す
+            return []
+    except Exception as e:
+        st.error(f"睡眠ステータスログの読み込み中にエラーが発生しました: {e}")
+        return []
+
+def get_status_and_time(log_data):
+    """
+    Supabaseのログデータ（UTC時刻）から最新の活動とJSTでの経過時間を計算する。
+    ※ ログデータが 'datetime' と 'type_jp', 'type_slug' を持つ形式を想定
+    """
+    if not log_data:
+        # データがない場合はデフォルト値を返す
+        return "ログなし", "—", None
+    
+    # 最新のログを取得（get_sleep_status_logは最新ログ1件をリストで返すため、[0]を取得）
+    latest_log = log_data[0] 
+    
+    # 1. ログ時刻をタイムゾーン付きで読み込み、JSTに変換する
+    log_time_utc = datetime.fromisoformat(latest_log['datetime'])
+    log_time_jst = log_time_utc.astimezone(pytz.timezone('Asia/Tokyo'))
+    
+    # 2. 現在時刻をJSTで取得する
+    current_time_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
+    
+    # 3. JST同士で経過時間を計算
+    delta = current_time_jst - log_time_jst
+    total_minutes = int(delta.total_seconds() / 60)
+
+    # 4. 経過時間を「〇時間〇分前」の文字列に変換
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    
+    if hours == 0 and minutes == 0:
+        time_passed_str = "たった今"
+    elif hours == 0:
+        time_passed_str = f"{minutes}分前"
+    else:
+        time_passed_str = f"{hours}時間{minutes}分前"
+    
+    # 5. ステータスを決定 (type_slug / type_jp に基づく)
+    action = latest_log.get('type_jp', '不明な活動')
+    status_text = "活動中" # デフォルト
+
+    # sleep_start と sleep_end の判定に特化
+    if latest_log.get('type_slug') == 'sleep_start' or "就寝" in action:
+        status_text = "就寝中"
+    elif latest_log.get('type_slug') == 'sleep_end' or "起床" in action:
+        status_text = "起床中"
+    
+    # その他の活動も表示したい場合は、ここにロジックを追加できます
+    # 例：elif "授乳" in action: status_text = "授乳後"
+
+    return status_text, time_passed_str, log_time_jst
 
 # ---------------------------------------------------------
 # 既存KPIから派生統計を計算 → 日常語ラベル化（色バッジは使わない）
@@ -904,30 +990,6 @@ def create_bar_chart(data, title, color="#4A90E2", average_value=None):
     return final_fig
 
 
-# 「今何してる」のステータスと経過時間を計算する関数＜カード6＞
-def get_status_and_time(log_data):
-    # 最新のログを取得
-    latest_log = max(log_data, key=lambda x: x['time'])
-    action = latest_log['action']
-    log_time = latest_log['time']
-    
-    current_time = datetime.now()
-    delta = current_time - log_time
-    minutes_passed = int(delta.total_seconds() / 60)
-    
-    # 状態を決定
-    status_text = ""
-    if "起床" in action:
-        status_text = "起床"
-    elif "就寝" in action:
-        status_text = "就寝"
-    else:
-        status_text = action.split(',')[0] 
-    
-    # 表示用の文字列を生成
-    time_passed_str = f"{minutes_passed}分経過"
-        
-    return status_text, time_passed_str, log_time
 
 #---------------------------------------------------------
 # メイン画面
@@ -941,7 +1003,7 @@ def main():
     elapsed_minutes = get_diaper_elapsed_time(table_name="baby_events")
     DIAPER_MAX_MINUTES = 180 # グラフの上限を180分に設定
 
-    # カード2用データ取得: 睡眠時間の日ごとの累計と前週平均 (新規追加)
+    # カード2用データ取得: 睡眠時間の日ごとの累計と前週平均 
     sleep_chart_data, last_week_avg_sleep = get_sleep_summary_data(table_name="baby_events")
 
     # カード3用データ取得　Supabaseから最新ログデータを取得
@@ -951,21 +1013,12 @@ def main():
     elapsed_minutes_feeding = get_feeding_elapsed_time(table_name="baby_events")
     FEEDING_MAX_MINUTES = 180 # 授乳グラフの上限を180分（3時間）に設定
 
-    # カード5用データ取得: ミルク量の日ごとの累計と前週平均 (新規追加)
+    # カード5用データ取得: ミルク量の日ごとの累計と前週平均 
     feeding_chart_data, last_week_avg_amount = get_feeding_summary_data(table_name="baby_events")
     
     # カード6用データ取得　Supabaseから最新の起床or就寝ログを取得
-    latest_sleep_log = None
-    try:
-        # type_slugが 'sleep_start' または 'sleep_end' の最新のログを1件取得
-        response = supabase_client.table("baby_events").select("datetime, type_slug").in_('type_slug', ['sleep_start', 'sleep_end']).order("datetime", desc=True).limit(1).execute()
-        if response.data:
-            latest_sleep_log = response.data[0]
-        else:
-            st.info("睡眠に関するデータがありません。")
-    except Exception as e:
-        st.error(f"睡眠データの読み込み中にエラーが発生しました: {e}")
-    
+    supabase_log_data = get_sleep_status_log(table_name="baby_events")  
+    latest_sleep_log = supabase_log_data[0] if supabase_log_data else None 
     
     
     
@@ -1037,46 +1090,67 @@ def main():
     with cols[5]:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">今何してる</div>', unsafe_allow_html=True)
+        
+        # latest_sleep_logがmain()で定義されていることを前提とする
         if latest_sleep_log:
-            # datetimeをISO 8601形式からdatetimeオブジェクトに変換
-            log_time = datetime.fromisoformat(latest_sleep_log['datetime'].replace('Z', '+00:00'))
-            current_time = datetime.now(log_time.tzinfo) # 現在時刻も同じタイムゾーンに合わせる
-
-            # 経過時間を計算
-            delta = current_time - log_time
-            minutes_passed = int(delta.total_seconds() / 60)
-
-            # 状態と表示テキストを決定
-            status_text = ""
+            
+            # 1. UTC時刻をJSTに変換
+            log_time_utc = datetime.fromisoformat(latest_sleep_log['datetime'])
+            log_time_jst = log_time_utc.astimezone(pytz.timezone('Asia/Tokyo'))
+            current_time_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
+            
+            # 2. 経過時間（分）を計算
+            delta = current_time_jst - log_time_jst
+            total_minutes = int(delta.total_seconds() / 60)
+            
+            # 3. 状態、絵文字、表示テキストを決定
+            status_text_verb = ""
+            status_text_current = "" # 「起きています」/「寝ています」 
             emoji = ""
-            if latest_sleep_log['type_slug'] == 'sleep_start':
-                status_text = "就寝"
+            
+            if latest_sleep_log.get('type_slug') == 'sleep_start':
+                status_text_verb = "就寝" # 表示文言を「就寝中」から「就寝」に変更
+                status_text_current = "寝ています"
                 emoji = "😴"
-            elif latest_sleep_log['type_slug'] == 'sleep_end':
-                status_text = "起床"
+            elif latest_sleep_log.get('type_slug') == 'sleep_end':
+                status_text_verb = "起床" # 表示文言を「起床中」から「起床」に変更
+                status_text_current = "起きています"
                 emoji = "🌞"
+            else:
+                status_text_verb = "不明"
+                status_text_current = "不明な状態"
+                emoji = "❓"
 
-            formatted_time_passed = f"{minutes_passed}分経過"
-
-            # HTMLで表示
+            # 4. 経過時間を「〇時間〇分」形式に変換
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            
+            if total_minutes < 1:
+                formatted_time_passed = "たった今"
+            elif hours == 0:
+                formatted_time_passed = f"{minutes}分経過"
+            else:
+                formatted_time_passed = f"{hours}時間{minutes}分経過" # 「経過」を削除
+                
+            # 5. HTML表示
             st.markdown(
                 f"""
                 <div style="text-align: center;">
-                    <div class="time-text">
-                        {log_time.strftime('%H:%M')}に{status_text}
-                    </div>
-                    <div class="time-text">
-                        {formatted_time_passed}
-                    </div>
-                    <div style="font-size: 3rem; margin-top: 1rem;">
+                    <div style="font-size: 3.0rem; margin-bottom: 0.5rem;">
                         {emoji}
+                    </div>
+                    <div style="font-size: 1.5rem; font-weight: bold; color: #3498db; margin-bottom: 0.5rem;">
+                        {status_text_current}
+                    </div>
+                    <div style="font-size: 1.0rem; color: #2c3e50;">
+                        {log_time_jst.strftime('%H:%M')}に{status_text_verb} &nbsp; | &nbsp; {formatted_time_passed}
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
         else:
-            st.info("睡眠のデータがありません。")
+            st.info("就寝/起床ログがありません。")
         st.markdown('</div>', unsafe_allow_html=True)
 
     #質問入力時、AIによる育児アドバイス部分に遷移するようにアンカーを設置。
