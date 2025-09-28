@@ -323,6 +323,35 @@ supabase_client = create_client(supabase_url, supabase_key)
 # ---------------------------------------------------------
 JST = pytz.timezone('Asia/Tokyo')
 
+def safe_to_jst(datetime_str: str) -> datetime:
+    """
+    データベースから取得したdatetime文字列を安全にJSTのdatetimeオブジェクトに変換する
+    
+    Args:
+        datetime_str: データベースから取得したdatetime文字列
+        
+    Returns:
+        datetime: JSTタイムゾーン付きのdatetimeオブジェクト
+    """
+    # Zが付いている場合は削除（Supabaseから取得した文字列が完全なJSTでない場合もあるため）
+    if isinstance(datetime_str, str) and datetime_str.endswith('Z'):
+        datetime_str = datetime_str[:-1]
+    
+    # datetimeオブジェクトに変換
+    try:
+        dt = datetime.fromisoformat(datetime_str)
+    except ValueError as e:
+        # 変換エラーの場合は、現在時刻（JST）を代わりに返すなど、堅牢な処理を検討
+        st.warning(f"時刻解析エラー: {e} - ログ: {datetime_str}。現在時刻を代替として使用します。")
+        return datetime.now(JST)
+    
+    # タイムゾーン情報を取り除き（ナイーブ化）、JSTとして確定する
+    # DBがJSTで保存されているという前提に基づき、これが最も安全です。
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+        
+    return JST.localize(dt)
+
 # ---------------------------------------------------------
 # supabaseからおむつ替え経過時間計算＜カード1＞
 # ---------------------------------------------------------
@@ -338,23 +367,19 @@ def get_diaper_elapsed_time(table_name="baby_events"):
         
         if response.data:
             latest_diaper_log = response.data[0]
-            # 1. ログ時刻をタイムゾーン付きで読み込み、JSTに変換する
-            log_time_utc = datetime.fromisoformat(latest_diaper_log['datetime'])
             
-            # 2. UTCからJSTに変換する
-            log_time_jst = log_time_utc.astimezone(pytz.timezone('Asia/Tokyo'))
+            # データベースの時刻はJSTとして扱う
+            log_time_jst = safe_to_jst(latest_diaper_log['datetime'])
+                        
+            # 現在時刻をJSTで取得
+            current_time_jst = datetime.now(JST)
             
-            # 3. 現在時刻をJSTで取得する (上記 1.で定義した JST を使用)
-            current_time_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
-            
-            # 4. JST同士で経過時間を計算
+            # JST同士で経過時間を計算
             delta = current_time_jst - log_time_jst
             minutes_passed = int(delta.total_seconds() / 60)
             
-            # 経過時間を返す
             return minutes_passed
         else:
-            # データがない場合は0分を返す
             return 0
     except Exception as e:
         st.error(f"おむつデータの読み込み中にエラーが発生しました: {e}")
@@ -370,25 +395,37 @@ def get_sleep_summary_data(table_name="baby_events"):
     日ごとの睡眠時間累計（14日間）と前週の平均値を計算して返す。
     """
     try:
-        # 1. データの取得
-        # 直近14日間のイベントだけだと、期間の開始前のsleep_startが欠ける可能性があるため、
-        # 余裕を持って過去15日間のデータを取得します。
         fifteen_days_ago = datetime.now() - timedelta(days=15)
         
-        # type_slugが 'sleep_start' または 'sleep_end' のログを取得
         response = supabase_client.table(table_name).select("datetime, type_slug").in_('type_slug', ['sleep_start', 'sleep_end']).gte('datetime', fifteen_days_ago.isoformat()).order("datetime", desc=False).execute()
         
         if not response.data:
-            # データがない場合のダミーデータ（14日間）
             dates_14 = [datetime.now().date() - timedelta(days=i) for i in range(13, -1, -1)]
             df_display = pd.DataFrame({'date': dates_14, 'count': [0.0] * 14})
             return df_display, 0.0
 
         df = pd.DataFrame(response.data)
-        # タイムゾーン変換
-        df['datetime'] = pd.to_datetime(df['datetime']) # UTC情報付きとして読み込む
-        df['datetime'] = df['datetime'].dt.tz_convert('Asia/Tokyo')  # UTCからJST (Asia/Tokyo) に変換
-        df['date'] = df['datetime'].dt.date  # 日付列を作成 (JSTベースの日付になる)
+        
+        # データベースの時刻はJSTとして扱う
+        df['datetime'] = df['datetime'].apply(safe_to_jst)
+        df['date'] = df['datetime'].dt.date
+        
+        # 睡眠時間の計算処理は変更なし
+        sleep_durations = []
+        i = 0
+        while i < len(df) - 1:
+            start_row = df.iloc[i]
+            end_row = df.iloc[i+1]
+            
+            if start_row['type_slug'] == 'sleep_start' and end_row['type_slug'] == 'sleep_end':
+                duration_hours = (end_row['datetime'] - start_row['datetime']).total_seconds() / 3600
+                sleep_durations.append({
+                    'date': end_row['datetime'].date(), 
+                    'duration_hours': duration_hours
+                })
+                i += 2
+            else:
+                i += 1 
         
         # 2. 睡眠時間の計算 (sleep_start から sleep_end までのペアを見つける)
         sleep_durations = []
@@ -457,25 +494,19 @@ def get_sleep_summary_data(table_name="baby_events"):
 #---------------------------------------------------------
 #@st.cache_data(ttl=60) # 1分間キャッシュ デモのリアルタイム性を考慮して非有効化
 def get_supabase_data(table_name="baby_events"):
-    """Supabaseからデータを取得し、JSTに変換して返す"""
+    """Supabaseからデータを取得し、JSTとして表示する"""
     try:
         response = supabase_client.table(table_name).select("datetime, type_jp").order("datetime", desc=True).limit(3).execute()
         
-        # データをDataFrameに変換
         df = pd.DataFrame(response.data)
         
-        # JST変換と表示フォーマット
         if not df.empty and 'datetime' in df.columns:
-            # 1. UTC情報付きとして読み込み
-            df['datetime'] = pd.to_datetime(df['datetime'])
+            # データベースの時刻はJSTとして扱う
+            df['datetime'] = df['datetime'].apply(safe_to_jst)
             
-            # 2. UTCからJST (Asia/Tokyo) に変換
-            df['datetime'] = df['datetime'].dt.tz_convert('Asia/Tokyo')
-            
-            # 3. 表示用の形式にフォーマット (タイムゾーン情報を削除して見やすくする)
+            # 表示用の形式にフォーマット
             df['datetime'] = df['datetime'].dt.strftime('%Y-%m-%d %H:%M')
             
-        # DataFrameを辞書リストに戻す（st.dataframeにそのまま渡せる）
         return df.to_dict('records')
     
     except Exception as e:
@@ -493,26 +524,23 @@ def get_feeding_elapsed_time(table_name="baby_events"):
     現在時刻からの経過時間（分）を計算する。
     """
     try:
-        # type_slugが 'formula' (ミルク) または 'breast' (母乳)(仮) の最新ログを1件取得
-        # baby_eventsテーブルログには'breast' (母乳)は無いので今後必要に応じて修正
         response = supabase_client.table(table_name).select("datetime, type_slug").in_('type_slug', ['formula', 'breast']).order("datetime", desc=True).limit(1).execute()
         
         if response.data:
             latest_feeding_log = response.data[0]
-            # datetimeをISO 8601形式からタイムゾーン情報付きのdatetimeオブジェクトに変換
-            log_time = datetime.fromisoformat(latest_feeding_log['datetime'].replace('Z', '+00:00'))
             
-            # 現在時刻も同じタイムゾーンに合わせる
-            current_time = datetime.now(log_time.tzinfo)
+            # データベースの時刻はJSTとして扱う
+            log_time_jst = safe_to_jst(latest_feeding_log['datetime'])
+            
+            # 現在時刻をJSTで取得
+            current_time_jst = datetime.now(JST)
             
             # 経過時間を計算
-            delta = current_time - log_time
+            delta = current_time_jst - log_time_jst
             minutes_passed = int(delta.total_seconds() / 60)
             
-            # 経過時間を返す
             return minutes_passed
         else:
-            # データがない場合は0分を返す
             return 0
     except Exception as e:
         st.error(f"授乳データの読み込み中にエラーが発生しました: {e}")
@@ -528,21 +556,19 @@ def get_feeding_summary_data(table_name="baby_events"):
     日ごとの累計値（14日間）と前週の平均値を計算して返す。
     """
     try:
-        # 直近14日間のデータを取得（今週7日 + 前週7日）
         fourteen_days_ago = datetime.now() - timedelta(days=14)
         
-        # type_slugが 'formula' のログを取得
         response = supabase_client.table(table_name).select("datetime, amount_ml, type_slug").eq('type_slug', 'formula').gte('datetime', fourteen_days_ago.isoformat()).order("datetime", desc=True).execute()
         
         if not response.data:
-            # グラフに表示するためのダミーデータ（14日間）を生成
             dates_14 = [datetime.now().date() - timedelta(days=i) for i in range(13, -1, -1)]
             df_display = pd.DataFrame({'date': dates_14, 'amount': [0] * 14})
             return df_display, 0
 
         df = pd.DataFrame(response.data)
-        # タイムゾーン変換後にtz-awareを削除
-        df['datetime'] = pd.to_datetime(df['datetime']).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None) 
+        
+        # データベースの時刻はJSTとして扱う
+        df['datetime'] = df['datetime'].apply(safe_to_jst)
         df['date'] = df['datetime'].dt.date
         df['amount_ml'] = pd.to_numeric(df['amount_ml'], errors='coerce').fillna(0)
         
@@ -610,7 +636,7 @@ def get_sleep_status_log(table_name="baby_events"):
 
 def get_status_and_time(log_data):
     """
-    Supabaseのログデータ（UTC時刻）から最新の活動とJSTでの経過時間を計算する。
+    Supabaseのログデータ（JST時刻）から最新の活動とJSTでの経過時間を計算する。
     ※ ログデータが 'datetime' と 'type_jp', 'type_slug' を持つ形式を想定
     """
     if not log_data:
@@ -620,10 +646,9 @@ def get_status_and_time(log_data):
     # 最新のログを取得（get_sleep_status_logは最新ログ1件をリストで返すため、[0]を取得）
     latest_log = log_data[0] 
     
-    # 1. ログ時刻をタイムゾーン付きで読み込み、JSTに変換する
-    log_time_utc = datetime.fromisoformat(latest_log['datetime'])
-    log_time_jst = log_time_utc.astimezone(pytz.timezone('Asia/Tokyo'))
-    
+    # 1. ログ時刻を safe_to_jst で JSTに変換する（これがJST前提で動作する）
+    log_time_jst = safe_to_jst(latest_log['datetime']) # 【変更点】safe_to_jstを使用
+
     # 2. 現在時刻をJSTで取得する
     current_time_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
     
@@ -1104,16 +1129,15 @@ def main():
         
         # latest_sleep_logがmain()で定義されていることを前提とする
         if latest_sleep_log:
-            
-            # 1. UTC時刻をJSTに変換
-            log_time_utc = datetime.fromisoformat(latest_sleep_log['datetime'])
-            log_time_jst = log_time_utc.astimezone(pytz.timezone('Asia/Tokyo'))
-            current_time_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
+        
+            # 1. データベースの時刻はJSTとして扱う
+            log_time_jst = safe_to_jst(latest_sleep_log['datetime']) # ★ safe_to_jst を使用
+            current_time_jst = datetime.now(JST)
             
             # 2. 経過時間（分）を計算
             delta = current_time_jst - log_time_jst
-            total_minutes = int(delta.total_seconds() / 60)
-            
+            total_minutes = int(delta.total_seconds() / 60) # ★ total_minutesをここで定義
+
             # 3. 状態、絵文字、表示テキストを決定
             status_text_verb = ""
             status_text_current = "" # 「起きています」/「寝ています」 
@@ -1231,7 +1255,7 @@ with st.sidebar:
 
     if st.button("検索 🔎", key="send_button", use_container_width=True):
         if user_input and user_input.strip():
-            fire_and_scroll(user_input.strip(),include_kpi=True)
+            fire_and_scroll(user_input.strip(),include_kpi=False) #include_kpi=False　自由質問はダッシュボードの内容を見ないように制御
             
         else:
             st.warning("質問を入力してください。")
