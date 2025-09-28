@@ -326,15 +326,15 @@ JST = pytz.timezone('Asia/Tokyo')
 # ---------------------------------------------------------
 # supabaseからおむつ替え経過時間計算＜カード1＞
 # ---------------------------------------------------------
-@st.cache_data(ttl=60) # 1分間キャッシュ
+#@st.cache_data(ttl=60) # 1分間キャッシュ デモのリアルタイム性を考慮して非有効化
 def get_diaper_elapsed_time(table_name="baby_events"):
     """
     Supabaseから最新の「おしっこ」または「うんち」のイベント時刻を取得し、
     現在時刻からの経過時間（分）を計算する。
     """
     try:
-        # type_slugが 'diaper_pee' (おしっこ) または 'diaper_poo' (うんち) の最新ログを1件取得
-        response = supabase_client.table(table_name).select("datetime, type_slug").in_('type_slug', ['diaper_pee', 'diaper_poo']).order("datetime", desc=True).limit(1).execute()
+        # type_slugが 'diaper_pee' (おしっこ) または 'diaper_poop' (うんち) の最新ログを1件取得
+        response = supabase_client.table(table_name).select("datetime, type_slug").in_('type_slug', ['diaper_pee', 'diaper_poop']).order("datetime", desc=True).limit(1).execute()
         
         if response.data:
             latest_diaper_log = response.data[0]
@@ -363,7 +363,7 @@ def get_diaper_elapsed_time(table_name="baby_events"):
 # ---------------------------------------------------------
 # supabaseから睡眠時間の日ごとの累計値と前週平均の計算＜カード2＞
 # ---------------------------------------------------------
-@st.cache_data(ttl=60) # 1分間キャッシュ
+#@st.cache_data(ttl=60) # 1分間キャッシュ　デモのリアルタイム性を考慮して非有効化
 def get_sleep_summary_data(table_name="baby_events"):
     """
     Supabaseから直近2週間分の睡眠イベントを取得し、
@@ -455,7 +455,7 @@ def get_sleep_summary_data(table_name="baby_events"):
 #---------------------------------------------------------
 #supabaseから最新ログを取得＜カード3＞
 #---------------------------------------------------------
-@st.cache_data(ttl=60) # 1分間キャッシュ
+#@st.cache_data(ttl=60) # 1分間キャッシュ デモのリアルタイム性を考慮して非有効化
 def get_supabase_data(table_name="baby_events"):
     """Supabaseからデータを取得し、JSTに変換して返す"""
     try:
@@ -486,7 +486,7 @@ def get_supabase_data(table_name="baby_events"):
 # ---------------------------------------------------------
 # supabaseから授乳経過時間計算＜カード4＞
 # ---------------------------------------------------------
-@st.cache_data(ttl=60) # 1分間キャッシュ
+#@st.cache_data(ttl=60) # 1分間キャッシュ デモのリアルタイム性を考慮して非有効化
 def get_feeding_elapsed_time(table_name="baby_events"):
     """
     Supabaseから最新の「授乳」イベント時刻を取得し、
@@ -521,7 +521,7 @@ def get_feeding_elapsed_time(table_name="baby_events"):
 # ---------------------------------------------------------
 # supabaseからミルク量の日ごとの累計値と前週平均の計算＜カード5＞
 # ---------------------------------------------------------
-@st.cache_data(ttl=60) # 1分間キャッシュ
+#@st.cache_data(ttl=60) # 1分間キャッシュ デモのリアルタイム性を考慮して非有効化
 def get_feeding_summary_data(table_name="baby_events"):
     """
     Supabaseから直近2週間分のミルク量データを取得し、
@@ -588,7 +588,7 @@ def get_feeding_summary_data(table_name="baby_events"):
 # ---------------------------------------------------------
 # supabaseから最新の睡眠ステータスログを取得・計算＜カード6用＞
 # ---------------------------------------------------------
-@st.cache_data(ttl=60) # 1分間キャッシュ
+#@st.cache_data(ttl=60) # 1分間キャッシュ デモのリアルタイム性を考慮して非有効化
 def get_sleep_status_log(table_name="baby_events"):
     """
     Supabaseから最新の「sleep_start」または「sleep_end」ログを1件取得する。
@@ -845,9 +845,13 @@ def ask_gpt_with_optional_kpi(user_question: str, include_kpi: bool = True) -> s
 #---------------------------------------------------------
 
 # 円形プログレスバーの作成（レスポンシブ対応）＜カード1・4＞
-def create_circular_progress(actual_value, max_value, color="#FF6B47"):
+def create_circular_progress(actual_value, max_value):
     """
     円形プログレスバーを作成し、中央に値を表示する
+    時間経過に応じて色を動的に変更：
+    - 0-120分: 青色 (#4A90E2)
+    - 121-179分: オレンジ色 (#FFA500) 
+    - 180分以上: 赤色 (#FF4500)
     
     Args:
         actual_value (int): 実際の経過時間（分）。中央に表示される値。
@@ -857,7 +861,14 @@ def create_circular_progress(actual_value, max_value, color="#FF6B47"):
     Returns:
         go.Figure: PlotlyのFigureオブジェクト。
     """
-    
+    # 時間経過に応じた色の動的決定
+    if actual_value <= 119:
+        progress_color = "#4A90E2"  # 青色
+    elif actual_value <= 179:
+        progress_color = "#FFA500"  # オレンジ色
+    else:
+        progress_color = "#FF4500"  # 赤色
+
     # グラフのオレンジ色の領域として表示する値。最大値を超えないように制限する。
     display_value = min(actual_value, max_value)
 
@@ -865,7 +876,7 @@ def create_circular_progress(actual_value, max_value, color="#FF6B47"):
     fig = go.Figure(data=[go.Pie(
         values=[display_value, max_value - display_value],
         hole=.7,
-        marker_colors=[color, '#d3d3d3'],
+        marker_colors=[progress_color, '#d3d3d3'],
         textinfo='none',
         showlegend=False,
         hoverinfo='skip',
@@ -949,7 +960,7 @@ def create_bar_chart(data, title, color="#4A90E2", average_value=None):
                 x=df['date'],
                 y=y_line, # ← 14日間のうち直近7日間にのみ平均値を設定
                 mode='lines',
-                line=dict(color='red', width=2),
+                line=dict(color='red', width=2, dash='dash'),
                 name='前週平均',
                 showlegend=False 
             )
@@ -1037,7 +1048,7 @@ def main():
     with cols[0]:
         st.markdown('<div class="card-title">おむつ替え経過時間</div>', unsafe_allow_html=True)
         # 経過時間と上限値(例：180分)を渡す
-        fig_diaper_progress = create_circular_progress(elapsed_minutes, DIAPER_MAX_MINUTES, "#ff8c00")
+        fig_diaper_progress = create_circular_progress(elapsed_minutes, DIAPER_MAX_MINUTES)
         st.plotly_chart(fig_diaper_progress, use_container_width=True, config={'displayModeBar': False}, key="diaper_progress")
     
     # カード2: 睡眠時間 前週平均比較
@@ -1073,7 +1084,7 @@ def main():
     # カード4: 授乳経過時間
     with cols[3]:
         st.markdown('<div class="card-title">授乳経過時間</div>', unsafe_allow_html=True)
-        fig_feeding_progress = create_circular_progress(elapsed_minutes_feeding, FEEDING_MAX_MINUTES, "#ff8c00") 
+        fig_feeding_progress = create_circular_progress(elapsed_minutes_feeding, FEEDING_MAX_MINUTES) 
         st.plotly_chart(fig_feeding_progress, use_container_width=True, config={'displayModeBar': False}, key="feeding_progress")
     
     # カード5: ミルク量 前週平均比較
