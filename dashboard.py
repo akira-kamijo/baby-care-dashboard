@@ -295,7 +295,7 @@ def get_chat_response(
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"エラーが発生しました: {e}"
+        return f"エラーが発生しました: {e}"  #環境変数の初期化　ターミナルで実行→　set OPENAI_API_KEY=
 
 #---------------------------------------------------------
 # Supabase APIキー関連
