@@ -12,7 +12,7 @@ import json #GPTでの分析の際にJson化させるため記載
 
 # ページ設定
 st.set_page_config(
-    page_title="ベビーケア ダッシュボード",
+    page_title="育ラボ",
     page_icon="👶",
     layout="wide",
     initial_sidebar_state="collapsed" #collapsed:折りたたみ expanded:展開
