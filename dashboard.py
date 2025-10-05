@@ -661,34 +661,127 @@ def get_status_and_time(log_data):
 # 既存KPIから派生統計を計算 → 日常語ラベル化（色バッジは使わない）
 # （DB集計関数の直後に置く：グラフ関数の前）
 # ---------------------------------------------------------
+# get_sleep_summary_data / get_feeding_summary_data / get_diaper_elapsed_time / get_feeding_elapsed_time
+# get_chat_response は既存実装を利用
+
 def _series_stats(values: list[float]) -> dict:
-    arr = np.array(values, dtype=float)
-    if arr.size == 0:
-        return {"mean": 0.0, "std": 0.0, "trend_slope_per_day": 0.0}
-    x = np.arange(arr.size, dtype=float)
+    """
+    目的:
+        数値系列(list[float])から「平均」「標準偏差」「１日あたりの直線的傾き」を計算する。
+    引数:
+        values:日単位の値(例:睡眠時間[h/日])、ミルク量[ml/日]
+    戻り値(dict):
+        {
+            "mean": 平均値(float),
+            "std": 標準偏差（float, 不偏ではなく母標準偏差 ddof=0）,
+            "trend_slope_per_day": 直線回帰で推定した1日あたりの傾き（float）
+        }
+    実装メモ:
+        - 配列化（np.array）して計算を安定化。
+        - データが空ならすべて0で返す（ダッシュボード側の表示を安全にするため）。
+        - 傾きはX=0..n-1を説明変数にpolyfit(1次)で取得（要素2以上の時のみ）。
+    """
+    #以下は上記戻り値（dict）の補足説明
+    #ddof=0 とは今あるデータ集合そのもののばらつき”**をそのまま測る、という意味。今週の実測データの事実を示すならddof=0がいいとのこと。ddof=1にすると分母がn-1になる。
+    #trend_slope_per_day 1日あたりに平均してどれくらい増減しているかを示す数値（単位は/日）
+
+    arr = np.array(values, dtype=float)#floatで少数を表せる数値型にすることで、平均・標準偏差・回帰の傾きなどの小数点計算を正確にする。
+    if arr.size == 0:#配列が空（要素数が０）かどうかチェック。データが１つもないと計算できないため使用。
+        return {"mean": 0.0, "std": 0.0, "trend_slope_per_day": 0.0}#空データの場合の安全な初期値を返す。0.0にすることでダッシュボードや後続処理でのエラーを防ぐ。
+    #以下のコードでやりたいこと
+    #日ごとのデータ（arr）があるとき、「最近1日あたりどのくらい増えている？減っている？」＝傾きをざっくり出したい
+    #そのために日数の番号（0日目、1日目、2日目…）を説明変数として使って直線を当てはめる（一次回帰）→直線の傾きを取り出す。
+    x = np.arange(arr.size, dtype=float)#データの本数分 x = 0,1,2という連番を作って「日数の流れを横軸にしている」 
+    #np.polyfit(x, arr, 1) は「x と arr の点群に、一次式（直線）を一番いい感じにフィットさせる」関数
+    #戻り値は [傾き, 切片] の2つ。[0] で傾き（slope）だけ取り出している。
+    #if文：ただし、データが1点しかないと直線の傾きは決められないので、その場合は 0.0 としている。
     slope = float(np.polyfit(x, arr, 1)[0]) if arr.size >= 2 else 0.0
     return {
-        "mean": float(arr.mean()),
-        "std": float(arr.std(ddof=0)),
-        "trend_slope_per_day": slope,
+        "mean": float(arr.mean()), #平均=全体の基準
+        "std": float(arr.std(ddof=0)), #標準偏差＝日々のムラ
+        "trend_slope_per_day": slope, #傾き＝最近の流れ（増えている？減っている？横這い？）
+        #上記3点セットがそろっていると状況の要約がやりやすい。
     }
 
 def _qualitative_labels(mean: float, std: float, slope: float, unit: str,
                         abs_threshold: float | None = None) -> dict:
     """
-    統計を“日常語”に変換（色やバッジは使わない）。
-    - 変動（CV=std/mean）: 『ほぼ毎日おなじ / 日によって少しちがう / 日によってかなりちがう』
-      目安幅も一緒に返す（±10%/±25% を実数化）
-    - 傾き: 1日あたり平均比±5%を目安に『少し増えつつある / 少し減りつつある / だいたい同じ』
+    目的:
+        数字の統計量（平均/標準偏差/傾き）を「日常語の短い表現」に変換する。
+    
+    引数:
+        mean:   平均
+        std:    標準偏差
+        slope:  1日あたりの傾き（_series_statsのtrend_slope_per_day）
+        unit:   単位の短い表記（例:"時間/日"、"ml/日"）
+        abs_threshold: 絶対値で傾きを有意とみなす下限（例:睡眠0.2h/日、ミルク20ml/日）
+                       （「傾きがこれ以上なら"増えている/減っている"と言い切ろう」という最低ラインのこと）
+                       Noneの場合は、絶対閾値を使わず、相対判定（±5%/日）だけで判定
+                       （絶対量ではなく「平均と比べて1日あたり±5% 以上なら増減とみなす」という相対的な目安だけで判定）
+    判定ロジック（概略）:
+    - 変動の大きさ(平均と比べて、どれくらい日々の差があるか): 変動係数 CV=std/|mean|を用い、閾値10%/25%で3段階に言語化: 『10%未満：ほぼ毎日おなじ / 10~25%：日によって少しちがう / 25%以上:日によってかなりちがう』
+      目安幅として±10%/±25% を実数化にして同梱
+      例）平均６時間なら
+      ・±10%~±0.6時間（この範囲内のブレなら小さめ）
+      ・±25%~±1.5時間（ここを超えるブレは大きめ）
+
+    - 傾き: slope（1日あたりの増減）が
+        ・プラスで十分大きい→「少し増えつつある」
+        ・マイナスで十分大きい→「少し減りつつある」
+        ・どちらでもない→「だいたい同じ」
+    　※「十分大きい」の判断は2つのどちらかを満たしたとき：
+        1.abs_threshold(絶対ライン)以上
+        　例：睡眠で+0.25h/日は0.2h/日を超えるので「増えてる」と言いやすい
+        2.平均と比べて±5%/日以上（相対ライン）
+        　例：平均6hで+0.4h/日は0.4/6~6.7%/日→増えてる判定
+    
+    戻り値（dict）:
+        {
+        "variability": 変動の大きさ,
+        "variability_phrase": 変動の説明（1行）,
+        "trend": 傾向
+        "trend_phrase": 傾向の説明（1行）
+        "guideline_band_10pct": 目安幅（±10%の実数(平均×0.10)）,
+        "guideline_band_25pct": 目安幅（±25%の実数(平均×0.25)）
+        }
+    
+    実装メモ:
+    - meanが0近傍で割り算が不安定にならないようepsを加算。
+        「変動の大きさ」を出すときにCV=標準偏差÷平均という計算をしている。
+        平均値が0に近いと分母が小さすぎて結果が「異常に大きな数字」になってしまう。
+        さらに平均が完全に0.0ならゼロ割エラーが発生する。
+        そこでeps（ごく小さい数。例:1e-8）を足すことで分母が完全に0になることや計算が極端に跳ね上がるのを防ぐ。
+    - "日常語"のみで返す要件のため、専門用語は返却値に含めない。
+    
+    具体例（数値でイメージ）
+    直近7日の睡眠：だいたい 6.0時間/日
+    日々のバラつき：0.6時間（平均の10%）
+    傾き：+0.25時間/日（ここ数日で少しずつ増えている）
+    単位：「時間/日」
+    絶対の目安（abs_threshold）：0.2時間/日
+
+    この場合の出力イメージ：
+    変動：10% → 「ほぼ毎日おなじ」
+    説明：「日ごとの差は小さめ（目安：±0.6時間/日以内）。」
+    傾向：+0.25h/日 は 0.2h/日 を超える → 「少し増えつつある」
+    説明：「ここ数日は時間/日がゆるやかに増えています。」
+    目安幅：
+    10% → ±0.6時間
+    25% → ±1.5時間
     """
-    eps = 1e-9
-    cv = std / (abs(mean) + eps)
-    band10 = abs(mean) * 0.10
+    eps = 1e-9 #ゼロ割を回避
+    cv = std / (abs(mean) + eps) #平均に対してどれくらいブレているか
+    band10 = abs(mean) * 0.10 #平均の10%を実際の単位(時間/日、ml/日)の数値に直す。abs(mean)を使うのは幅が必ず正の値になるようにするため。
     band25 = abs(mean) * 0.25
 
-    if cv < 0.10:
+    #統計用語を使わず、一目でニュアンスが伝わる日本語に落とし込むための閾値設計。
+    #具体例:平均6.0時間/日、標準偏差:0.9時間
+    #cv = 0.9/6.0 = 0.15(15%)→日によって少し違う
+    #UI/説明向け：単位を含む自然な一文(variability_phrase)をそのまま画面やプロンプトに出せる。
+
+    if cv < 0.10: #cv(=ブレの割合)に応じて3つのラベルのどれかを選ぶ
         variability = "ほぼ毎日おなじ"
-        variability_phrase = f"日ごとの差は小さめ（目安: ±{band10:.1f}{unit}以内）。"
+        variability_phrase = f"日ごとの差は小さめ（目安: ±{band10:.1f}{unit}以内）。" #.1fは小数点1桁で丸めて見やすくする工夫
     elif cv < 0.25:
         variability = "日によって少しちがう"
         variability_phrase = f"日ごとの差は中くらい（目安: ±{band10:.1f}〜±{band25:.1f}{unit}）。"
@@ -696,9 +789,17 @@ def _qualitative_labels(mean: float, std: float, slope: float, unit: str,
         variability = "日によってかなりちがう"
         variability_phrase = f"日ごとの差は大きめ（目安: ±{band25:.1f}{unit}以上）。"
 
+    #二段構えの有意性チェック（絶対・相対）で言い過ぎを防止
+    #相対しきい値（5%/日）や絶対しきい値（0.2h/日、20ml/日）は対象に合わせて調整可能。
+    #平均が0のときは%判定を切り離し、絶対量で判断
+
+    #1日あたりの変化量slopeが平均meanに対してどれくらいの割合かを出している。
+    #同じ「+0.3/日」でも平均6なら+5%/日、平均12なら+2.5%/日。平均に対する割合でみると大小の比較がフェアになる。
     rel = abs(slope) / (abs(mean) + eps) if mean else 0.0
-    use_abs = abs_threshold is not None and abs(slope) >= abs_threshold
-    use_rel = rel >= 0.05  # 5%/日を目安
+    #相対基準だけだと平均が極端に小さい/大きいと判定がブレる、絶対基準だけだと指標のスケール以前になり比較がしにくい。
+    #両方用意して、どちらかを満たせば有意とすることで現実的で過剰反応しない判定にしている。
+    use_abs = abs_threshold is not None and abs(slope) >= abs_threshold #絶対的な基準を超えたか（睡眠時間0.2時間/日、ミルクなら20ml/日）
+    use_rel = rel >= 0.05  # 相対的な基準(5%/日)を超えたか
 
     if (slope > 0) and (use_abs or use_rel):
         trend = "少し増えつつある"
@@ -722,10 +823,29 @@ def _qualitative_labels(mean: float, std: float, slope: float, unit: str,
 # GPTプロンプト組み立て（KPI_JSON同梱）と質問別インストラクション・共通呼び出し
 # ---------------------------------------------------------
 def build_kpi_payload_for_gpt() -> dict:
-    # 既存の集計関数を再利用（ダッシュボードと同条件）
+    """
+    目的:
+        ダッシュボードと同じ集計条件でKPI(直近7日+前週平均など)を取得し、
+        "派生統計"と"日常語ラベル"を付けたJSONを作る。
+        GPTに渡す一次ソース(KPI_JSON)として使用。
+    
+    処理の流れ:
+        1)既存の集計関数から睡眠/授乳の日次データと前週平均を取得
+        2)直近7日分だけを抽出(tail(7))
+        3)値列（2列目）を安全に特定→欠損は0で穴埋め
+        4)_series_statsで平均・標準偏差・傾きを計算
+        5)_qualitative_labelsで"日常語ラベル"を付与
+        　（睡眠の傾きは0.2h/日、ミルクは20ml/日を絶対閾値の目安として利用）
+        6)おむつ/授乳の「前回からの経過分（分）」も付け、バケット化（0-90/90-180/180+）
+        7)GPTに渡しやすいフラットな辞書構造（JSON）で返す
+    """
+    # 既存の集計関数から睡眠と授乳のグラフ用データと前週平均を取得。
+    #table_name="baby_events" は、データの置き場所（テーブル名）を明示。
+    #ダッシュボードと同じ条件で集計し、数字の整合性を保つ。
     sleep_chart_data, last_week_avg_sleep = get_sleep_summary_data(table_name="baby_events")
     feeding_chart_data, last_week_avg_amount = get_feeding_summary_data(table_name="baby_events")
-
+    #おむつ・授乳の最終イベントからの経過分を取得。関数が (ラベル, 分) で返す場合に備え、分だけにそろえる。
+    #呼び出し元の差異（戻り値がタプル/単値）を吸収し、あとで扱いやすい整数 minutesへ統一。
     diaper_elapsed = get_diaper_elapsed_time(table_name="baby_events")
     feeding_elapsed = get_feeding_elapsed_time(table_name="baby_events")
     if isinstance(diaper_elapsed, tuple): _, diaper_elapsed = diaper_elapsed
